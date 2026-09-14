@@ -148,6 +148,8 @@ func (p *Provider) ImportCurrent(id, email string) (*provider.StoredAccount, err
 	}
 
 	if existingID != "" && existingID != id {
+		// Live session is existingID — heal the pointer before refusing.
+		_ = p.store.SetActiveProfileName(existingID)
 		return nil, fmt.Errorf("account for %s already exists under profile '%s' — refusing to create duplicate '%s' (use 'swaper rename %s <new-name>' to rename it)", email, existingID, id, existingID)
 	}
 
@@ -156,6 +158,9 @@ func (p *Provider) ImportCurrent(id, email string) (*provider.StoredAccount, err
 		if err := p.store.SaveProfile(id, auth); err != nil {
 			return nil, fmt.Errorf("failed to save profile: %w", err)
 		}
+		p.invalidate(id)
+		// The live session IS this account — heal a stale pointer.
+		_ = p.store.SetActiveProfileName(id)
 		return nil, fmt.Errorf("account for %s is already saved as '%s' (token refreshed)", email, id)
 	}
 
@@ -167,10 +172,11 @@ func (p *Provider) ImportCurrent(id, email string) (*provider.StoredAccount, err
 	if err := p.store.SaveProfile(id, auth); err != nil {
 		return nil, fmt.Errorf("failed to save profile: %w", err)
 	}
+	p.invalidate(id)
 
-	if p.store.GetActiveProfileName() == "" {
-		_ = p.store.SetActiveProfileName(id)
-	}
+	// The imported profile holds the live session, so it is active by
+	// definition — point the marker at it (heals external logins too).
+	_ = p.store.SetActiveProfileName(id)
 
 	return &provider.StoredAccount{
 		ID:        id,
@@ -230,10 +236,17 @@ func (p *Provider) RemoveAccount(id string) error {
 }
 
 // SwitchTo changes the active profile atomically:
-// 1. Saves current active profile's keyring state back to disk (to persist any refreshed token).
-// 2. Loads target profile's token.
-// 3. Writes target token to keyring.
-// 4. Updates active_profile.txt.
+//
+//  1. Loads the target profile and refuses empty placeholders.
+//  2. Reads the LIVE keyring session and reconciles it against stored
+//     profiles (never trusts active_profile.txt blindly):
+//     - live == target: already active, refresh stored copy + heal pointer.
+//     - live == another stored profile: persist refreshed token to its true
+//     owner (not to a stale pointer).
+//     - live == unknown external login: preserve it to a derived profile
+//     before overwriting so no login is silently destroyed.
+//  3. Writes the target token to the keyring and verifies by reading back.
+//  4. Updates active_profile.txt.
 func (p *Provider) SwitchTo(account provider.StoredAccount) error {
 	// First check if CLI is running and warn
 	running, _ := p.IsCLIRunning()
@@ -241,18 +254,41 @@ func (p *Provider) SwitchTo(account provider.StoredAccount) error {
 		// Note: caller can prompt, but provider proceeds safely
 	}
 
-	// Step 1: Save current keyring back to active profile if active profile is set
-	currActive := p.store.GetActiveProfileName()
-	if currActive != "" {
-		if currAuth, err := accounts.ReadCurrentKeyring(); err == nil {
-			_ = p.store.SaveProfile(currActive, currAuth)
-		}
-	}
-
-	// Step 2: Load target profile auth
+	// Step 1: Load target profile auth
 	targetAuth, err := p.store.LoadProfile(account.ID)
 	if err != nil {
 		return fmt.Errorf("failed to load target profile '%s': %w", account.ID, err)
+	}
+	if !accounts.HasCredentials(targetAuth) {
+		return fmt.Errorf("profile '%s' has no saved credentials (empty placeholder) — run 'agy auth login' then 'swaper import %s' first", account.ID, account.ID)
+	}
+
+	// Step 2: Reconcile the LIVE session before touching anything.
+	if currAuth, err := accounts.ReadCurrentKeyring(); err == nil && accounts.HasCredentials(currAuth) {
+		if accounts.SameAuthAccount(currAuth, targetAuth) {
+			// Keyring already holds the target: no-op switch, just persist
+			// any refreshed token and heal a stale pointer file.
+			_ = p.store.SaveProfile(account.ID, currAuth)
+			p.invalidate(account.ID)
+			if err := p.store.SetActiveProfileName(account.ID); err != nil {
+				return fmt.Errorf("failed to mark profile as active: %w", err)
+			}
+			return nil
+		}
+		if owner := p.store.LiveOwnerName(currAuth); owner != "" {
+			if owner != account.ID {
+				// Persist refreshed live token to its true owner —
+				// never to a stale active_profile.txt pointer.
+				_ = p.store.SaveProfile(owner, currAuth)
+				p.invalidate(owner)
+			}
+		} else {
+			// Unknown external session: preserve it so switching away
+			// does not destroy a login swaper doesn't know about.
+			if err := p.preserveUnknownSession(currAuth); err != nil {
+				return err
+			}
+		}
 	}
 
 	// Step 3: Write target auth into keyring
@@ -260,12 +296,75 @@ func (p *Provider) SwitchTo(account provider.StoredAccount) error {
 		return fmt.Errorf("failed to update keyring for '%s': %w", account.ID, err)
 	}
 
-	// Step 4: Update active marker
+	// Step 4: Verify the write actually took (read back + compare identity,
+	// not access_token which may differ by refresh timing).
+	if back, err := accounts.ReadCurrentKeyring(); err != nil {
+		return fmt.Errorf("switch wrote keyring for '%s' but cannot read it back: %w", account.ID, err)
+	} else if !accounts.SameAuthAccount(back, targetAuth) {
+		return fmt.Errorf("switch verification failed: keyring session after write does not match profile '%s'", account.ID)
+	}
+
+	// Step 5: Update active marker
 	if err := p.store.SetActiveProfileName(account.ID); err != nil {
 		return fmt.Errorf("failed to mark profile as active: %w", err)
 	}
+	p.invalidate(account.ID)
 
 	return nil
+}
+
+// preserveUnknownSession stashes a live keyring login that matches no stored
+// profile under a derived name (email local part or "external") so SwitchTo
+// never destroys it. Returns an error if the session cannot be preserved.
+func (p *Provider) preserveUnknownSession(live *accounts.StoredAuthToken) error {
+	email := accounts.ExtractEmailFromIDToken(live.IDToken)
+	base := "external"
+	if email != "" {
+		if at := strings.Index(email, "@"); at > 0 {
+			base = email[:at]
+		} else {
+			base = email
+		}
+	}
+	base = strings.ToLower(strings.TrimSpace(base))
+	base = strings.ReplaceAll(base, "/", "-")
+	base = strings.ReplaceAll(base, "\\", "-")
+	if err := accounts.ValidateProfileName(base); err != nil {
+		base = "external"
+	}
+
+	name := base
+	for i := 2; ; i++ {
+		existing, err := p.store.LoadProfile(name)
+		if err != nil {
+			break // free slot
+		}
+		if accounts.SameAuthAccount(existing, live) {
+			_ = p.store.SaveProfile(name, live)
+			return nil
+		}
+		if !accounts.HasCredentials(existing) {
+			break // reuse empty placeholder
+		}
+		name = fmt.Sprintf("%s-%d", base, i)
+		if err := accounts.ValidateProfileName(name); err != nil {
+			return fmt.Errorf("cannot preserve current agy session (%s): %v — run 'swaper import <name>' first", email, err)
+		}
+	}
+
+	if err := p.store.SaveProfile(name, live); err != nil {
+		return fmt.Errorf("cannot preserve current agy session (%s) as '%s': %w — run 'swaper import <name>' first", email, name, err)
+	}
+	p.invalidate(name)
+	return nil
+}
+
+func (p *Provider) invalidate(ids ...string) {
+	p.cacheMu.Lock()
+	for _, id := range ids {
+		delete(p.cache, id)
+	}
+	p.cacheMu.Unlock()
 }
 
 // FetchStatus queries the quota and plan tier for the account without mutating system keyring.

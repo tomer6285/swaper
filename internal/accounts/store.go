@@ -125,12 +125,64 @@ func (ps *ProfileStore) SetActiveProfileName(name string) error {
 	return os.Rename(tmpFile, ps.ActiveProfileFile())
 }
 
+// SameAuthAccount reports whether two stored tokens belong to the same
+// Google account. It matches by email (case-insensitive) first, then falls
+// back to refresh_token equality so rotated access tokens and unparseable
+// ID tokens still match. Empty identities never match.
+func SameAuthAccount(a, b *StoredAuthToken) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	emailA := strings.ToLower(strings.TrimSpace(ExtractEmailFromIDToken(a.IDToken)))
+	emailB := strings.ToLower(strings.TrimSpace(ExtractEmailFromIDToken(b.IDToken)))
+	if emailA != "" && emailA == emailB {
+		return true
+	}
+	if a.Token.RefreshToken != "" && a.Token.RefreshToken == b.Token.RefreshToken {
+		return true
+	}
+	return false
+}
+
+// HasCredentials reports whether a stored token can actually authenticate
+// (i.e. it is not an empty placeholder created by `swaper add`).
+func HasCredentials(auth *StoredAuthToken) bool {
+	if auth == nil {
+		return false
+	}
+	return auth.Token.RefreshToken != "" || auth.Token.AccessToken != ""
+}
+
+// LiveOwnerName identifies which stored profile (if any) owns the given live
+// keyring session. Returns "" when the session matches nothing stored.
+func (ps *ProfileStore) LiveOwnerName(live *StoredAuthToken) string {
+	if !HasCredentials(live) {
+		return ""
+	}
+	return ps.FindDuplicate(live)
+}
+
 // ListProfiles returns all saved profile names and their active status.
+//
+// IsActive reflects the LIVE agy session (system keyring), not just the
+// active_profile.txt pointer:
+//   - keyring readable + matches a stored profile -> that profile is active
+//     (pointer may be stale; live truth wins)
+//   - keyring readable + matches nothing -> external/unknown session, none active
+//   - keyring unreadable (logged out) -> fall back to the pointer file
 func (ps *ProfileStore) ListProfiles() ([]provider.StoredAccount, error) {
+	// Best-effort live read done outside the lock (keychain I/O can block).
+	liveAuth, liveErr := ReadCurrentKeyring()
+	liveOwner := ""
+	liveReadable := liveErr == nil && HasCredentials(liveAuth)
+	if liveReadable {
+		liveOwner = ps.FindDuplicate(liveAuth)
+	}
+
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
-	active := ps.GetActiveProfileName()
+	fileActive := ps.GetActiveProfileName()
 	entries, err := os.ReadDir(ps.ProfilesDir())
 	if err != nil {
 		return nil, err
@@ -160,7 +212,7 @@ func (ps *ProfileStore) ListProfiles() ([]provider.StoredAccount, error) {
 		accounts = append(accounts, provider.StoredAccount{
 			ID:        name,
 			Email:     email,
-			IsActive:  name == active,
+			IsActive:  ps.isLiveActive(name, fileActive, liveReadable, liveOwner),
 			CreatedAt: info.ModTime(),
 			UpdatedAt: info.ModTime(),
 		})
@@ -174,6 +226,19 @@ func (ps *ProfileStore) ListProfiles() ([]provider.StoredAccount, error) {
 	})
 
 	return accounts, nil
+}
+
+// isLiveActive resolves the active flag for one profile given the live
+// keyring state. Pure function to keep ListProfiles testable.
+func (ps *ProfileStore) isLiveActive(name, fileActive string, liveReadable bool, liveOwner string) bool {
+	if liveReadable {
+		if liveOwner != "" {
+			return name == liveOwner
+		}
+		// Live session exists but matches nothing stored: external login.
+		return false
+	}
+	return name == fileActive
 }
 
 // SaveProfile saves the auth token data and optional files for an account.
