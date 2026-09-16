@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,9 +22,14 @@ import (
 )
 
 const (
-	QuotaEndpoint = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
-	TierEndpoint  = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
-	UserAgent     = "antigravity-cli"
+	// Primary hosts. agy itself talks to daily-cloudcode-pa (see its
+	// quota_manager / cli.log); the plain cloudcode-pa host returns stale
+	// buckets (e.g. 5h stuck at 1.0), so it is only a fallback.
+	QuotaEndpoint         = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
+	QuotaFallbackEndpoint = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
+	TierEndpoint          = "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
+	TierFallbackEndpoint  = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
+	UserAgent             = "antigravity-cli"
 )
 
 // QuotaResponse reflects the JSON payload returned by retrieveUserQuotaSummary
@@ -57,6 +63,9 @@ type Provider struct {
 	store      *accounts.ProfileStore
 	httpClient *http.Client
 
+	quotaEndpoints []string
+	tierEndpoints  []string
+
 	// Cache quota requests to prevent rate limits
 	cacheMu sync.RWMutex
 	cache   map[string]cacheEntry
@@ -78,7 +87,9 @@ func NewProvider(storageDir string) (*Provider, error) {
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
-		cache: make(map[string]cacheEntry),
+		quotaEndpoints: []string{QuotaEndpoint, QuotaFallbackEndpoint},
+		tierEndpoints:  []string{TierEndpoint, TierFallbackEndpoint},
+		cache:         make(map[string]cacheEntry),
 	}, nil
 }
 
@@ -442,7 +453,27 @@ func (p *Provider) FetchStatus(ctx context.Context, account provider.StoredAccou
 }
 
 func (p *Provider) fetchQuotas(ctx context.Context, accessToken string) ([]provider.Quota, error) {
-	req, err := http.NewRequestWithContext(ctx, "POST", QuotaEndpoint, bytes.NewBuffer([]byte("{}")))
+	var lastErr error
+	for _, endpoint := range p.quotaEndpoints {
+		quotas, err := p.fetchQuotasFrom(ctx, accessToken, endpoint)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if len(quotas) == 0 {
+			lastErr = fmt.Errorf("%s returned no quota buckets", endpoint)
+			continue
+		}
+		return quotas, nil
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no quota endpoints configured")
+	}
+	return nil, lastErr
+}
+
+func (p *Provider) fetchQuotasFrom(ctx context.Context, accessToken, endpoint string) ([]provider.Quota, error) {
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewBuffer([]byte("{}")))
 	if err != nil {
 		return nil, err
 	}
@@ -469,52 +500,152 @@ func (p *Provider) fetchQuotas(ctx context.Context, accessToken string) ([]provi
 	var quotas []provider.Quota
 	now := time.Now()
 
-	// Prioritize Gemini Models group, fallback to others
+	// Collect buckets from every Gemini-named group (the API returns 2+
+	// groups — e.g. "Gemini Models" and "Claude and GPT models" — and their
+	// order is not stable, so never rely on group position or `break` after
+	// the first match). Dedupe by normalized window; first seen wins.
+	seen := map[string]bool{}
+	type rawBucket struct {
+		BucketID          string
+		Window            string
+		ResetTime         string
+		Description       string
+		RemainingFraction float64
+	}
+	var geminiBuckets []rawBucket
 	for _, grp := range qr.Groups {
-		if strings.Contains(strings.ToLower(grp.DisplayName), "gemini") {
-			for _, b := range grp.Buckets {
-				resetTime, _ := time.Parse(time.RFC3339, b.ResetTime)
-				resetIn := formatResetIn(resetTime.Sub(now))
-				label := b.Window
-				if b.BucketID == "gemini-5h" || b.Window == "5h" {
-					label = "5-hour"
-				} else if b.BucketID == "gemini-weekly" || b.Window == "weekly" {
-					label = "Weekly"
-				}
-
-				quotas = append(quotas, provider.Quota{
-					Label:       label,
-					PercentLeft: b.RemainingFraction * 100.0,
-					ResetAt:     resetTime,
-					ResetIn:     resetIn,
-					Description: b.Description,
-				})
+		if !strings.Contains(strings.ToLower(grp.DisplayName), "gemini") {
+			continue
+		}
+		for _, b := range grp.Buckets {
+			key := quotaWindowKey(b.BucketID, b.Window)
+			if seen[key] {
+				continue
 			}
-			break
+			seen[key] = true
+			geminiBuckets = append(geminiBuckets, rawBucket{
+				BucketID:          b.BucketID,
+				Window:            b.Window,
+				ResetTime:         b.ResetTime,
+				Description:       b.Description,
+				RemainingFraction: b.RemainingFraction,
+			})
 		}
 	}
 
-	// Fallback to first group if no gemini group found
-	if len(quotas) == 0 && len(qr.Groups) > 0 {
+	// Fallback to first group if no gemini group found (keeps old behavior
+	// for renamed/unknown payloads, but still rendered in canonical order).
+	if len(geminiBuckets) == 0 && len(qr.Groups) > 0 {
 		for _, b := range qr.Groups[0].Buckets {
-			resetTime, _ := time.Parse(time.RFC3339, b.ResetTime)
-			quotas = append(quotas, provider.Quota{
-				Label:       b.Window,
-				PercentLeft: b.RemainingFraction * 100.0,
-				ResetAt:     resetTime,
-				ResetIn:     formatResetIn(resetTime.Sub(now)),
-				Description: b.Description,
+			geminiBuckets = append(geminiBuckets, rawBucket{
+				BucketID:          b.BucketID,
+				Window:            b.Window,
+				ResetTime:         b.ResetTime,
+				Description:       b.Description,
+				RemainingFraction: b.RemainingFraction,
 			})
 		}
+	}
+
+	// Canonical display order: 5-hour first, Weekly second, anything else
+	// after — regardless of the order the API returned the buckets in.
+	// (API bucket order is not stable; rendering it verbatim made the two
+	// limits appear to randomly swap positions.)
+	sort.SliceStable(geminiBuckets, func(i, j int) bool {
+		return quotaWindowRank(geminiBuckets[i].BucketID, geminiBuckets[i].Window) <
+			quotaWindowRank(geminiBuckets[j].BucketID, geminiBuckets[j].Window)
+	})
+
+	for _, b := range geminiBuckets {
+		resetTime, resetIn := parseResetTime(b.ResetTime, now)
+		quotas = append(quotas, provider.Quota{
+			Label:       quotaDisplayLabel(b.BucketID, b.Window),
+			PercentLeft: b.RemainingFraction * 100.0,
+			ResetAt:     resetTime,
+			ResetIn:     resetIn,
+			Description: b.Description,
+		})
 	}
 
 	return quotas, nil
 }
 
-func (p *Provider) fetchPlanTier(ctx context.Context, accessToken string) string {
-	req, err := http.NewRequestWithContext(ctx, "POST", TierEndpoint, bytes.NewBuffer([]byte("{}")))
+// quotaWindowKey normalizes a bucket to its window slot ("5h", "weekly", or
+// the raw identifier) so duplicates across groups collapse to one entry.
+func quotaWindowKey(bucketID, window string) string {
+	id := strings.ToLower(strings.TrimSpace(bucketID))
+	w := strings.ToLower(strings.TrimSpace(window))
+	if strings.Contains(id, "5h") || strings.Contains(w, "5h") ||
+		strings.Contains(id, "5-hour") || strings.Contains(w, "5-hour") ||
+		strings.Contains(id, "five-hour") || strings.Contains(id, "five_hour") {
+		return "5h"
+	}
+	if strings.Contains(id, "week") || strings.Contains(w, "week") {
+		return "weekly"
+	}
+	if id != "" {
+		return "id:" + id
+	}
+	return "window:" + w
+}
+
+// quotaWindowRank orders buckets for display: 5-hour (0), weekly (1),
+// anything unknown last (2).
+func quotaWindowRank(bucketID, window string) int {
+	switch quotaWindowKey(bucketID, window) {
+	case "5h":
+		return 0
+	case "weekly":
+		return 1
+	default:
+		return 2
+	}
+}
+
+// quotaDisplayLabel maps a bucket to its TUI label.
+func quotaDisplayLabel(bucketID, window string) string {
+	switch quotaWindowKey(bucketID, window) {
+	case "5h":
+		return "5-hour"
+	case "weekly":
+		return "Weekly"
+	default:
+		if strings.TrimSpace(window) != "" {
+			return window
+		}
+		return bucketID
+	}
+}
+
+// parseResetTime parses an API resetTime into (time, humanized). A missing or
+// unparseable resetTime (e.g. a full 100% bucket with no reset scheduled)
+// yields "—", not "now": zero time minus now is negative, and the old code
+// rendered that as "reset now", making healthy accounts look exhausted.
+func parseResetTime(s string, now time.Time) (time.Time, string) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}, "—"
+	}
+	t, err := time.Parse(time.RFC3339Nano, s)
 	if err != nil {
-		return "Standard"
+		return time.Time{}, "—"
+	}
+	return t, formatResetIn(t.Sub(now))
+}
+
+func (p *Provider) fetchPlanTier(ctx context.Context, accessToken string) string {
+	for _, endpoint := range p.tierEndpoints {
+		if tier, ok := p.fetchPlanTierFrom(ctx, accessToken, endpoint); ok {
+			return tier
+		}
+	}
+	return "Standard"
+}
+
+func (p *Provider) fetchPlanTierFrom(ctx context.Context, accessToken, endpoint string) (string, bool) {
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewBuffer([]byte("{}")))
+	if err != nil {
+		return "", false
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
@@ -522,30 +653,30 @@ func (p *Provider) fetchPlanTier(ctx context.Context, accessToken string) string
 
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
-		return "Standard"
+		return "", false
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "Standard"
+		return "", false
 	}
 
 	var tr TierResponse
 	if err := json.NewDecoder(resp.Body).Decode(&tr); err != nil {
-		return "Standard"
+		return "", false
 	}
 
 	tierID := strings.ToLower(tr.CurrentTier.ID)
 	if strings.Contains(tierID, "free") {
-		return "Free"
+		return "Free", true
 	} else if strings.Contains(tierID, "pro") {
-		return "Pro"
+		return "Pro", true
 	} else if strings.Contains(tierID, "ultra") {
-		return "Ultra"
+		return "Ultra", true
 	} else if tr.CurrentTier.Name != "" {
-		return tr.CurrentTier.Name
+		return tr.CurrentTier.Name, true
 	}
-	return "Standard"
+	return "Standard", true
 }
 
 func formatResetIn(d time.Duration) string {
