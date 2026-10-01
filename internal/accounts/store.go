@@ -458,8 +458,8 @@ func EnsureValidAccessToken(auth *StoredAuthToken) (string, error) {
 	}
 
 	// Ordered credential pairs: explicit config first, then every combination
-	// embedded in the CLI binary. The binary can hold several (old + new),
-	// and only the right pairing is accepted, so try each in turn.
+	// embedded in the CLI binary if needed. The binary can hold several (old + new),
+	// and only the right pairing is accepted.
 	var pairs [][2]string
 	seen := map[[2]string]bool{}
 	push := func(id, secret string) {
@@ -478,14 +478,9 @@ func EnsureValidAccessToken(auth *StoredAuthToken) (string, error) {
 	if cfg, err := config.LoadConfig(); err == nil {
 		push(cfg.GoogleClientID, cfg.GoogleClientSecret)
 	}
-	for _, p := range config.CandidatePairs("agy") {
-		push(p[0], p[1])
-	}
-	if len(pairs) == 0 {
-		return "", fmt.Errorf("missing OAuth client credentials: set SWAPER_GOOGLE_CLIENT_ID and SWAPER_GOOGLE_CLIENT_SECRET (or google_client_id/secret in ~/.swaper/config.json)")
-	}
 
 	var lastErr error
+	// 1. Try explicit / remembered credentials first to avoid expensive binary scanning.
 	for i, p := range pairs {
 		token, retryPair, err := tryRefreshPair(auth, p[0], p[1])
 		if err == nil {
@@ -499,10 +494,32 @@ func EnsureValidAccessToken(auth *StoredAuthToken) (string, error) {
 		}
 		lastErr = err
 	}
+
+	// 2. Only if known credentials were absent or failed, scan candidate pairs from the CLI binary.
+	var candidates [][2]string
+	for _, p := range config.CandidatePairs("agy") {
+		if !seen[p] {
+			seen[p] = true
+			candidates = append(candidates, p)
+		}
+	}
+
+	for _, p := range candidates {
+		token, retryPair, err := tryRefreshPair(auth, p[0], p[1])
+		if err == nil {
+			config.RememberCredentials(p[0], p[1])
+			return token, nil
+		}
+		if !retryPair {
+			return "", err
+		}
+		lastErr = err
+	}
+
 	if lastErr != nil {
 		return "", lastErr
 	}
-	return "", fmt.Errorf("token refresh failed: no working OAuth client pair found")
+	return "", fmt.Errorf("missing or invalid OAuth client credentials: set SWAPER_GOOGLE_CLIENT_ID and SWAPER_GOOGLE_CLIENT_SECRET (or google_client_id/secret in ~/.swaper/config.json)")
 }
 
 // tryRefreshPair attempts one token refresh. The second return value reports

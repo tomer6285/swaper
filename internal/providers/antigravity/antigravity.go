@@ -67,13 +67,14 @@ type Provider struct {
 	tierEndpoints  []string
 
 	// Cache quota requests to prevent rate limits
-	cacheMu sync.RWMutex
-	cache   map[string]cacheEntry
+	cacheMu   sync.RWMutex
+	cache     map[string]cacheEntry
+	cacheFile string
 }
 
 type cacheEntry struct {
-	status    provider.AccountStatus
-	fetchedAt time.Time
+	Status    provider.AccountStatus `json:"status"`
+	FetchedAt time.Time              `json:"fetched_at"`
 }
 
 func NewProvider(storageDir string) (*Provider, error) {
@@ -82,15 +83,65 @@ func NewProvider(storageDir string) (*Provider, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Provider{
+
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.MaxIdleConnsPerHost = 10
+
+	p := &Provider{
 		store: store,
 		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
+			Timeout:   10 * time.Second,
+			Transport: tr,
 		},
 		quotaEndpoints: []string{QuotaEndpoint, QuotaFallbackEndpoint},
 		tierEndpoints:  []string{TierEndpoint, TierFallbackEndpoint},
-		cache:         make(map[string]cacheEntry),
-	}, nil
+		cache:          make(map[string]cacheEntry),
+		cacheFile:      filepath.Join(antigravityDir, "cache.json"),
+	}
+	p.loadCacheFromDisk()
+	return p, nil
+}
+
+func (p *Provider) loadCacheFromDisk() {
+	if p.cacheFile == "" {
+		return
+	}
+	data, err := os.ReadFile(p.cacheFile)
+	if err != nil {
+		return
+	}
+	var diskCache map[string]cacheEntry
+	if err := json.Unmarshal(data, &diskCache); err == nil && diskCache != nil {
+		p.cacheMu.Lock()
+		p.cache = diskCache
+		p.cacheMu.Unlock()
+	}
+}
+
+func (p *Provider) saveCacheToDisk() {
+	if p.cacheFile == "" {
+		return
+	}
+	p.cacheMu.RLock()
+	data, err := json.MarshalIndent(p.cache, "", "  ")
+	p.cacheMu.RUnlock()
+	if err != nil {
+		return
+	}
+	tmpFile := p.cacheFile + ".tmp"
+	if err := os.WriteFile(tmpFile, data, 0600); err == nil {
+		_ = os.Rename(tmpFile, p.cacheFile)
+	}
+}
+
+func (p *Provider) CachedStatus(id string) (provider.AccountStatus, bool) {
+	p.cacheMu.RLock()
+	defer p.cacheMu.RUnlock()
+	entry, found := p.cache[id]
+	if !found {
+		return provider.AccountStatus{}, false
+	}
+	return entry.Status, true
 }
 
 func (p *Provider) ID() string {
@@ -109,6 +160,9 @@ func (p *Provider) InvalidateCache() {
 	p.cacheMu.Lock()
 	p.cache = make(map[string]cacheEntry)
 	p.cacheMu.Unlock()
+	if p.cacheFile != "" {
+		_ = os.Remove(p.cacheFile)
+	}
 }
 
 func (p *Provider) ListAccounts() ([]provider.StoredAccount, error) {
@@ -376,16 +430,17 @@ func (p *Provider) invalidate(ids ...string) {
 		delete(p.cache, id)
 	}
 	p.cacheMu.Unlock()
+	p.saveCacheToDisk()
 }
 
 // FetchStatus queries the quota and plan tier for the account without mutating system keyring.
 func (p *Provider) FetchStatus(ctx context.Context, account provider.StoredAccount) (provider.AccountStatus, error) {
-	// Check in-memory cache (60s TTL)
+	// Check in-memory / persistent cache (60s TTL)
 	p.cacheMu.RLock()
 	entry, found := p.cache[account.ID]
 	p.cacheMu.RUnlock()
-	if found && time.Since(entry.fetchedAt) < 60*time.Second {
-		return entry.status, nil
+	if found && time.Since(entry.FetchedAt) < 60*time.Second {
+		return entry.Status, nil
 	}
 
 	auth, err := p.store.LoadProfile(account.ID)
@@ -418,20 +473,40 @@ func (p *Provider) FetchStatus(ctx context.Context, account provider.StoredAccou
 		email = accounts.ExtractEmailFromIDToken(auth.IDToken)
 	}
 
-	// Fetch Quotas
-	quotas, err := p.fetchQuotas(ctx, token)
-	if err != nil {
+	// Fetch Quotas and Plan Tier concurrently
+	var (
+		quotas   []provider.Quota
+		quotaErr error
+		plan     = "Standard"
+		wg       sync.WaitGroup
+	)
+
+	if found && entry.Status.Plan != "" {
+		plan = entry.Status.Plan
+	}
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		quotas, quotaErr = p.fetchQuotas(ctx, token)
+	}()
+	go func() {
+		defer wg.Done()
+		if pTier := p.fetchPlanTier(ctx, token); pTier != "" {
+			plan = pTier
+		}
+	}()
+	wg.Wait()
+
+	if quotaErr != nil {
 		return provider.AccountStatus{
 			ID:          account.ID,
 			Email:       email,
 			Healthy:     false,
 			LastChecked: time.Now(),
-			Error:       fmt.Sprintf("quota fetch error: %v", err),
+			Error:       fmt.Sprintf("quota fetch error: %v", quotaErr),
 		}, nil
 	}
-
-	// Fetch Plan Tier
-	plan := p.fetchPlanTier(ctx, token)
 
 	status := provider.AccountStatus{
 		ID:          account.ID,
@@ -444,10 +519,11 @@ func (p *Provider) FetchStatus(ctx context.Context, account provider.StoredAccou
 
 	p.cacheMu.Lock()
 	p.cache[account.ID] = cacheEntry{
-		status:    status,
-		fetchedAt: time.Now(),
+		Status:    status,
+		FetchedAt: time.Now(),
 	}
 	p.cacheMu.Unlock()
+	p.saveCacheToDisk()
 
 	return status, nil
 }
@@ -455,7 +531,9 @@ func (p *Provider) FetchStatus(ctx context.Context, account provider.StoredAccou
 func (p *Provider) fetchQuotas(ctx context.Context, accessToken string) ([]provider.Quota, error) {
 	var lastErr error
 	for _, endpoint := range p.quotaEndpoints {
-		quotas, err := p.fetchQuotasFrom(ctx, accessToken, endpoint)
+		perReqCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+		quotas, err := p.fetchQuotasFrom(perReqCtx, accessToken, endpoint)
+		cancel()
 		if err != nil {
 			lastErr = err
 			continue
@@ -485,7 +563,10 @@ func (p *Provider) fetchQuotasFrom(ctx context.Context, accessToken, endpoint st
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -635,7 +716,10 @@ func parseResetTime(s string, now time.Time) (time.Time, string) {
 
 func (p *Provider) fetchPlanTier(ctx context.Context, accessToken string) string {
 	for _, endpoint := range p.tierEndpoints {
-		if tier, ok := p.fetchPlanTierFrom(ctx, accessToken, endpoint); ok {
+		perReqCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+		tier, ok := p.fetchPlanTierFrom(perReqCtx, accessToken, endpoint)
+		cancel()
+		if ok {
 			return tier
 		}
 	}
@@ -655,7 +739,10 @@ func (p *Provider) fetchPlanTierFrom(ctx context.Context, accessToken, endpoint 
 	if err != nil {
 		return "", false
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return "", false

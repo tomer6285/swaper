@@ -126,11 +126,10 @@ func CandidatePairs(cliBinary string) [][2]string {
 		}
 	}
 	candCacheMu.Lock()
+	defer candCacheMu.Unlock()
 	if cached, ok := candCache[bin]; ok {
-		candCacheMu.Unlock()
 		return cached
 	}
-	candCacheMu.Unlock()
 
 	data, err := os.ReadFile(bin)
 	if err != nil || len(data) == 0 {
@@ -158,9 +157,7 @@ func CandidatePairs(cliBinary string) [][2]string {
 			pairs = append(pairs, [2]string{id, secret})
 		}
 	}
-	candCacheMu.Lock()
 	candCache[bin] = pairs
-	candCacheMu.Unlock()
 	return pairs
 }
 
@@ -182,7 +179,9 @@ func extractFromCLIBinary(cliBinary string) (id, secret string) {
 	if err != nil || len(data) == 0 {
 		return "", ""
 	}
-	return clientIDPattern.FindString(string(data)), clientSecretPattern.FindString(string(data))
+	idBytes := clientIDPattern.Find(data)
+	secBytes := clientSecretPattern.Find(data)
+	return string(idBytes), string(secBytes)
 }
 
 func SaveConfig(cfg Config) error {

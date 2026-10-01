@@ -41,6 +41,7 @@ type Provider interface {
 	CLIBinary() string
 	ListAccounts() ([]StoredAccount, error)
 	FetchStatus(ctx context.Context, account StoredAccount) (AccountStatus, error)
+	CachedStatus(id string) (AccountStatus, bool)
 	SwitchTo(account StoredAccount) error
 	ImportCurrent(id, email string) (*StoredAccount, error)
 	AddNew(id, email string) (*StoredAccount, error)

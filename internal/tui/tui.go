@@ -164,6 +164,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		var cmds []tea.Cmd
 		for _, acc := range m.accounts {
+			if st, ok := m.provider.CachedStatus(acc.ID); ok {
+				m.statuses[acc.ID] = st
+			}
 			m.loading[acc.ID] = true
 			cmds = append(cmds, m.fetchStatusCmd(acc))
 		}
@@ -413,7 +416,7 @@ func (m Model) renderAccountCard(acc provider.StoredAccount, isSelected bool) st
 
 	// Quota lines
 	var quotaContent string
-	if isLoading {
+	if isLoading && !hasStatus {
 		quotaContent = dimStyle.Render("  Fetching quota...")
 	} else if !hasStatus || !st.Healthy {
 		errMsg := "error fetching quota"

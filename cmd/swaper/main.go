@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"sync"
 	"text/tabwriter"
 	"time"
 
@@ -186,23 +187,29 @@ func main() {
 			}
 		}
 
-		var statuses []provider.AccountStatus
+		statuses := make([]provider.AccountStatus, len(accs))
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
-		for _, a := range accs {
-			st, err := p.FetchStatus(ctx, a)
-			if err != nil {
-				statuses = append(statuses, provider.AccountStatus{
-					ID:      a.ID,
-					Email:   a.Email,
-					Healthy: false,
-					Error:   err.Error(),
-				})
-			} else {
-				statuses = append(statuses, st)
-			}
+		var wg sync.WaitGroup
+		for i, a := range accs {
+			wg.Add(1)
+			go func(idx int, acc provider.StoredAccount) {
+				defer wg.Done()
+				st, err := p.FetchStatus(ctx, acc)
+				if err != nil {
+					statuses[idx] = provider.AccountStatus{
+						ID:      acc.ID,
+						Email:   acc.Email,
+						Healthy: false,
+						Error:   err.Error(),
+					}
+				} else {
+					statuses[idx] = st
+				}
+			}(i, a)
 		}
+		wg.Wait()
 
 		if *jsonFlag {
 			enc := json.NewEncoder(os.Stdout)
