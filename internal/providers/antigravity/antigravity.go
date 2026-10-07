@@ -149,7 +149,7 @@ func (p *Provider) ID() string {
 }
 
 func (p *Provider) DisplayName() string {
-	return "Antigravity (Gemini pool)"
+	return "antigravity"
 }
 
 func (p *Provider) CLIBinary() string {
@@ -581,66 +581,71 @@ func (p *Provider) fetchQuotasFrom(ctx context.Context, accessToken, endpoint st
 	var quotas []provider.Quota
 	now := time.Now()
 
-	// Collect buckets from every Gemini-named group (the API returns 2+
-	// groups — e.g. "Gemini Models" and "Claude and GPT models" — and their
-	// order is not stable, so never rely on group position or `break` after
-	// the first match). Dedupe by normalized window; first seen wins.
+	// Collect buckets from both Gemini-named groups and 3P/Claude/GPT (Other) groups.
+	// Order in API is not stable, so we collect and normalize buckets from both pools.
 	seen := map[string]bool{}
-	type rawBucket struct {
-		BucketID          string
-		Window            string
-		ResetTime         string
-		Description       string
-		RemainingFraction float64
-	}
-	var geminiBuckets []rawBucket
+	var allBuckets []rawBucket
+	var hasGemini, hasOther bool
+
 	for _, grp := range qr.Groups {
-		if !strings.Contains(strings.ToLower(grp.DisplayName), "gemini") {
-			continue
-		}
+		grpName := strings.ToLower(grp.DisplayName)
+		isGem := strings.Contains(grpName, "gemini")
+		isOther := strings.Contains(grpName, "gpt") || strings.Contains(grpName, "claude") ||
+			strings.Contains(grpName, "openai") || strings.Contains(grpName, "3p") ||
+			strings.Contains(grpName, "other")
+
 		for _, b := range grp.Buckets {
-			key := quotaWindowKey(b.BucketID, b.Window)
-			if seen[key] {
+			wKey := quotaWindowKey(b.BucketID, b.Window)
+			prefix := "other"
+			if isGem {
+				prefix = "gemini"
+				hasGemini = true
+			} else if isOther {
+				prefix = "other"
+				hasOther = true
+			}
+			dedupeKey := prefix + ":" + wKey
+			if seen[dedupeKey] {
 				continue
 			}
-			seen[key] = true
-			geminiBuckets = append(geminiBuckets, rawBucket{
+			seen[dedupeKey] = true
+			allBuckets = append(allBuckets, rawBucket{
 				BucketID:          b.BucketID,
 				Window:            b.Window,
 				ResetTime:         b.ResetTime,
 				Description:       b.Description,
 				RemainingFraction: b.RemainingFraction,
+				IsGemini:          isGem,
+				IsOther:           isOther,
 			})
 		}
 	}
 
-	// Fallback to first group if no gemini group found (keeps old behavior
-	// for renamed/unknown payloads, but still rendered in canonical order).
-	if len(geminiBuckets) == 0 && len(qr.Groups) > 0 {
+	// Fallback to first group if nothing matched
+	if len(allBuckets) == 0 && len(qr.Groups) > 0 {
 		for _, b := range qr.Groups[0].Buckets {
-			geminiBuckets = append(geminiBuckets, rawBucket{
+			allBuckets = append(allBuckets, rawBucket{
 				BucketID:          b.BucketID,
 				Window:            b.Window,
 				ResetTime:         b.ResetTime,
 				Description:       b.Description,
 				RemainingFraction: b.RemainingFraction,
+				IsGemini:          true,
 			})
 		}
+		hasGemini = true
 	}
 
-	// Canonical display order: 5-hour first, Weekly second, anything else
-	// after — regardless of the order the API returned the buckets in.
-	// (API bucket order is not stable; rendering it verbatim made the two
-	// limits appear to randomly swap positions.)
-	sort.SliceStable(geminiBuckets, func(i, j int) bool {
-		return quotaWindowRank(geminiBuckets[i].BucketID, geminiBuckets[i].Window) <
-			quotaWindowRank(geminiBuckets[j].BucketID, geminiBuckets[j].Window)
+	// Canonical display order: Gemini 5h, Gemini Weekly, Other 5h, Other Weekly, others
+	sort.SliceStable(allBuckets, func(i, j int) bool {
+		return rawBucketRank(allBuckets[i]) < rawBucketRank(allBuckets[j])
 	})
 
-	for _, b := range geminiBuckets {
+	hasBoth := hasGemini && hasOther
+	for _, b := range allBuckets {
 		resetTime, resetIn := parseResetTime(b.ResetTime, now)
 		quotas = append(quotas, provider.Quota{
-			Label:       quotaDisplayLabel(b.BucketID, b.Window),
+			Label:       quotaDisplayLabel(b.BucketID, b.Window, b.IsGemini, b.IsOther, hasBoth),
 			PercentLeft: b.RemainingFraction * 100.0,
 			ResetAt:     resetTime,
 			ResetIn:     resetIn,
@@ -649,6 +654,45 @@ func (p *Provider) fetchQuotasFrom(ctx context.Context, accessToken, endpoint st
 	}
 
 	return quotas, nil
+}
+
+type rawBucket struct {
+	BucketID          string
+	Window            string
+	ResetTime         string
+	Description       string
+	RemainingFraction float64
+	IsGemini          bool
+	IsOther           bool
+}
+
+func rawBucketRank(b rawBucket) int {
+	wKey := quotaWindowKey(b.BucketID, b.Window)
+	if b.IsGemini {
+		if wKey == "5h" {
+			return 0
+		}
+		if wKey == "weekly" {
+			return 1
+		}
+		return 2
+	}
+	if b.IsOther {
+		if wKey == "5h" {
+			return 3
+		}
+		if wKey == "weekly" {
+			return 4
+		}
+		return 5
+	}
+	if wKey == "5h" {
+		return 6
+	}
+	if wKey == "weekly" {
+		return 7
+	}
+	return 8
 }
 
 // quotaWindowKey normalizes a bucket to its window slot ("5h", "weekly", or
@@ -670,22 +714,34 @@ func quotaWindowKey(bucketID, window string) string {
 	return "window:" + w
 }
 
-// quotaWindowRank orders buckets for display: 5-hour (0), weekly (1),
-// anything unknown last (2).
-func quotaWindowRank(bucketID, window string) int {
-	switch quotaWindowKey(bucketID, window) {
-	case "5h":
-		return 0
-	case "weekly":
-		return 1
-	default:
-		return 2
+func quotaDisplayLabel(bucketID, window string, isGemini, isOther, hasBoth bool) string {
+	wKey := quotaWindowKey(bucketID, window)
+	if hasBoth {
+		if isGemini {
+			if wKey == "5h" {
+				return "Gemini 5h"
+			}
+			if wKey == "weekly" {
+				return "Gemini Weekly"
+			}
+		} else if isOther {
+			if wKey == "5h" {
+				return "Other 5h"
+			}
+			if wKey == "weekly" {
+				return "Other Weekly"
+			}
+		}
 	}
-}
-
-// quotaDisplayLabel maps a bucket to its TUI label.
-func quotaDisplayLabel(bucketID, window string) string {
-	switch quotaWindowKey(bucketID, window) {
+	if isOther {
+		if wKey == "5h" {
+			return "Other 5h"
+		}
+		if wKey == "weekly" {
+			return "Other Weekly"
+		}
+	}
+	switch wKey {
 	case "5h":
 		return "5-hour"
 	case "weekly":

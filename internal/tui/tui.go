@@ -50,8 +50,10 @@ type clearStatusMsg struct {
 }
 
 type Model struct {
-	provider provider.Provider
-	cfg      config.Config
+	provider    provider.Provider
+	providers   []provider.Provider
+	providerIdx int
+	cfg         config.Config
 
 	accounts []provider.StoredAccount
 	statuses map[string]provider.AccountStatus
@@ -66,23 +68,28 @@ type Model struct {
 	confirmSwitch bool
 	pendingSwitch *provider.StoredAccount
 
-	inputMode   bool
-	inputPrompt string
-	inputValue  string
-	inputAction string
+	inputMode    bool
+	inputPrompt  string
+	inputValue   string
+	inputAction  string
 	renameTarget string
 
 	width  int
 	height int
 }
 
-func NewModel(p provider.Provider, cfg config.Config) Model {
+func NewModel(cfg config.Config, providers ...provider.Provider) Model {
+	if len(providers) == 0 {
+		panic("at least one provider required")
+	}
 	return Model{
-		provider: p,
-		cfg:      cfg,
-		statuses: make(map[string]provider.AccountStatus),
-		loading:  make(map[string]bool),
-		cursor:   0,
+		provider:    providers[0],
+		providers:   providers,
+		providerIdx: 0,
+		cfg:         cfg,
+		statuses:    make(map[string]provider.AccountStatus),
+		loading:     make(map[string]bool),
+		cursor:      0,
 	}
 }
 
@@ -340,6 +347,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 
+		case "tab":
+			if len(m.providers) > 1 {
+				m.providerIdx = (m.providerIdx + 1) % len(m.providers)
+				m.provider = m.providers[m.providerIdx]
+				m.cfg.ActiveProvider = m.provider.ID()
+				_ = config.SaveConfig(m.cfg)
+				m.cursor = 0
+				m.accounts = nil
+				m.statuses = make(map[string]provider.AccountStatus)
+				m.loading = make(map[string]bool)
+				m.statusMsg = ""
+				m.statusMsgID++
+				return m, m.loadAccountsCmd()
+			}
+			return m, nil
+
 		case "o":
 			if len(m.accounts) > 0 && m.cursor < len(m.accounts) {
 				m.launching = true
@@ -363,7 +386,11 @@ func (m Model) View() string {
 
 	// Header
 	headerLeft := titleStyle.Render(fmt.Sprintf("swaper — %s", m.provider.DisplayName()))
-	headerRight := dimStyle.Render("q: quit  r: refresh  i: import  R: rename  enter: switch  o: open agy")
+	hints := "q: quit  r: refresh  i: import  R: rename  enter: switch  o: open"
+	if len(m.providers) > 1 {
+		hints = "Tab: provider  " + hints
+	}
+	headerRight := dimStyle.Render(hints)
 	gap := max(2, m.width-lipgloss.Width(headerLeft)-lipgloss.Width(headerRight))
 	sb.WriteString(headerLeft + strings.Repeat(" ", gap) + headerRight + "\n\n")
 
@@ -426,6 +453,20 @@ func (m Model) renderAccountCard(acc provider.StoredAccount, isSelected bool) st
 		quotaContent = dimStyle.Render("  " + errMsg)
 	} else if len(st.Quotas) == 0 {
 		quotaContent = dimStyle.Render("  No quota metrics reported.")
+	} else if len(st.Quotas) > 2 {
+		var lines []string
+		for i := 0; i < len(st.Quotas); i += 2 {
+			var rowParts []string
+			for j := i; j < i+2 && j < len(st.Quotas); j++ {
+				q := st.Quotas[j]
+				bar := renderBar(q.PercentLeft)
+				pct := fmt.Sprintf("%3.0f%%", q.PercentLeft)
+				reset := dimStyle.Render(fmt.Sprintf("reset %s", q.ResetIn))
+				rowParts = append(rowParts, fmt.Sprintf("%-13s %s %s  %s", q.Label, bar, pct, reset))
+			}
+			lines = append(lines, "  "+strings.Join(rowParts, "   │   "))
+		}
+		quotaContent = strings.Join(lines, "\n\n")
 	} else {
 		var parts []string
 		for _, q := range st.Quotas {
@@ -467,17 +508,17 @@ func renderBar(pct float64) string {
 	return barLowStyle.Render(filledStr) + dimStyle.Render(emptyStr)
 }
 
-func Run(p provider.Provider, cfg config.Config) error {
-	m := NewModel(p, cfg)
+func Run(cfg config.Config, providers ...provider.Provider) error {
+	m := NewModel(cfg, providers...)
 	pProg := tea.NewProgram(m, tea.WithAltScreen())
 	finalModel, err := pProg.Run()
 	if err != nil {
 		return err
 	}
 	if mFinal, ok := finalModel.(Model); ok && mFinal.launching {
-		acc, _ := p.ActiveAccount()
+		acc, _ := mFinal.provider.ActiveAccount()
 		if acc != nil {
-			return p.LaunchCLI(*acc)
+			return mFinal.provider.LaunchCLI(*acc)
 		}
 	}
 	return nil

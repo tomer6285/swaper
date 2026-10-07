@@ -23,6 +23,7 @@ type Config struct {
 	YellowThreshold float64       `json:"yellow_threshold"` // default: 10%
 	CLIBinary       string        `json:"cli_binary"`       // default: agy
 	StorageDir      string        `json:"storage_dir"`      // default: ~/.swaper
+	ActiveProvider  string        `json:"active_provider,omitempty"` // "antigravity" or "openai"
 	// OAuth client for token refresh. Never hardcoded — set via env
 	// (SWAPER_GOOGLE_CLIENT_ID / SWAPER_GOOGLE_CLIENT_SECRET) or config.json.
 	GoogleClientID     string `json:"google_client_id,omitempty"`
@@ -46,6 +47,7 @@ func DefaultConfig() Config {
 		YellowThreshold: 10.0,
 		CLIBinary:       "agy",
 		StorageDir:      filepath.Join(home, ".swaper"),
+		ActiveProvider:  "antigravity",
 		GoogleClientID:     envFirst("SWAPER_GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_ID"),
 		GoogleClientSecret: envFirst("SWAPER_GOOGLE_CLIENT_SECRET", "GOOGLE_CLIENT_SECRET"),
 	}
@@ -68,6 +70,9 @@ func LoadConfig() (Config, error) {
 		}
 		if cfg.GoogleClientSecret == "" {
 			cfg.GoogleClientSecret = envFirst("SWAPER_GOOGLE_CLIENT_SECRET", "GOOGLE_CLIENT_SECRET")
+		}
+		if cfg.ActiveProvider == "" {
+			cfg.ActiveProvider = "antigravity"
 		}
 	}
 	// Drop cached values with impossible shapes (e.g. from an earlier greedy

@@ -56,18 +56,25 @@ func TestFetchQuotasCanonicalOrderRegardlessOfAPIOrder(t *testing.T) {
 	}
 }
 
-func TestFetchQuotasIgnoresGroupOrder(t *testing.T) {
-	// 3p group first — must still show the Gemini pool, not Claude/GPT.
+func TestFetchQuotasIncludesGeminiAndOther(t *testing.T) {
+	// 3p group first — must return both Gemini and Other pools in canonical order.
 	body := `{"groups":[{"displayName":"Claude and GPT models","buckets":[{"bucketId":"3p-5h","window":"5h","remainingFraction":0.1},{"bucketId":"3p-weekly","window":"weekly","resetTime":"2030-08-31T11:50:43Z","remainingFraction":0.2}]},{"displayName":"Gemini Models","buckets":[{"bucketId":"gemini-5h","window":"5h","resetTime":"2030-08-27T15:45:28Z","remainingFraction":0.853},{"bucketId":"gemini-weekly","window":"weekly","resetTime":"2030-08-29T12:08:59Z","remainingFraction":0.583}]}]}`
 	q, err := testServer(t, body).fetchQuotas(context.Background(), "tok")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(q) != 2 {
-		t.Fatalf("expected 2 gemini quotas, got %d: %v", len(q), q)
+	if len(q) != 4 {
+		t.Fatalf("expected 4 quotas (Gemini + Other), got %d: %v", len(q), q)
 	}
-	if q[0].PercentLeft != 85.3 || q[1].PercentLeft != 58.3 {
-		t.Fatalf("wrong pool selected (3p leak?): %v", q)
+	expectedLabels := []string{"Gemini 5h", "Gemini Weekly", "Other 5h", "Other Weekly"}
+	expectedPercents := []float64{85.3, 58.3, 10.0, 20.0}
+	for i := range expectedLabels {
+		if q[i].Label != expectedLabels[i] {
+			t.Errorf("quota[%d] label = %q, want %q", i, q[i].Label, expectedLabels[i])
+		}
+		if q[i].PercentLeft != expectedPercents[i] {
+			t.Errorf("quota[%d] percent = %v, want %v", i, q[i].PercentLeft, expectedPercents[i])
+		}
 	}
 }
 
