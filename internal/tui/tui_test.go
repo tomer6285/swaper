@@ -101,3 +101,61 @@ func TestTabSwitchesProviderWithoutStatusText(t *testing.T) {
 	}
 }
 
+type dummyLauncherProvider struct {
+	dummyProvider
+	launchErr error
+	launched  bool
+}
+
+func (d *dummyLauncherProvider) LaunchApp() error {
+	d.launched = true
+	return d.launchErr
+}
+
+func (d *dummyLauncherProvider) AppDisplayName() string {
+	return "Dummy App"
+}
+
+func TestShiftOLaunchesDesktopApp(t *testing.T) {
+	lp := &dummyLauncherProvider{
+		dummyProvider: dummyProvider{id: "p1", name: "Provider 1"},
+	}
+	m := NewModel(config.Config{}, lp)
+
+	// Verify hint mentions "O: app"
+	view := m.View()
+	if !strings.Contains(view, "O: app") {
+		t.Errorf("expected View() to show 'O: app' hint, got:\n%s", view)
+	}
+
+	// Press 'O' (Shift+O)
+	newM, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'O'}})
+	updated := newM.(Model)
+
+	if !lp.launched {
+		t.Errorf("expected LaunchApp to be called")
+	}
+	if !strings.Contains(updated.statusMsg, "Launched Dummy App ✓") {
+		t.Errorf("expected status message to contain 'Launched Dummy App ✓', got %q", updated.statusMsg)
+	}
+}
+
+func TestShiftONoDesktopApp(t *testing.T) {
+	p := &dummyProvider{id: "p1", name: "Provider 1"}
+	m := NewModel(config.Config{}, p)
+
+	// Verify hint mentions "o: open" without "O: app"
+	view := m.View()
+	if strings.Contains(view, "O: app") {
+		t.Errorf("expected View() not to show 'O: app' hint, got:\n%s", view)
+	}
+
+	// Press 'O'
+	newM, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'O'}})
+	updated := newM.(Model)
+
+	if !strings.Contains(updated.statusMsg, "No desktop app available") {
+		t.Errorf("expected 'No desktop app available', got %q", updated.statusMsg)
+	}
+}
+

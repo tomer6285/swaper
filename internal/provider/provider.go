@@ -52,3 +52,9 @@ type Provider interface {
 	LaunchCLI(account StoredAccount) error
 	InvalidateCache()
 }
+
+// AppLauncher is an optional interface for providers that support launching a desktop GUI application.
+type AppLauncher interface {
+	LaunchApp() error
+	AppDisplayName() string
+}

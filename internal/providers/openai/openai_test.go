@@ -189,3 +189,14 @@ func TestParseUnixReset(t *testing.T) {
 		t.Errorf("unexpected reset time string: %q", s2)
 	}
 }
+
+func TestOpenAIAppLauncher(t *testing.T) {
+	p, err := NewProvider(t.TempDir())
+	if err != nil {
+		t.Fatalf("failed to create provider: %v", err)
+	}
+	var launcher provider.AppLauncher = p
+	if launcher.AppDisplayName() != "ChatGPT Desktop" {
+		t.Errorf("expected AppDisplayName 'ChatGPT Desktop', got %q", launcher.AppDisplayName())
+	}
+}

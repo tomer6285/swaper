@@ -31,6 +31,7 @@ Usage:
   swaper rename <old> <new> Rename a profile
   swaper remove <name>   Remove a profile
   swaper open            Launch provider CLI using active account
+  swaper app             Launch provider desktop app (e.g. ChatGPT Desktop)
   swaper provider [name] Show or set default provider (antigravity, openai)
 
 Options:
@@ -378,6 +379,18 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error launching CLI: %v\n", err)
 			os.Exit(1)
 		}
+
+	case "app":
+		launcher, ok := p.(provider.AppLauncher)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "Provider '%s' does not have a desktop app.\n", p.DisplayName())
+			os.Exit(1)
+		}
+		if err := launcher.LaunchApp(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error launching %s: %v\n", launcher.AppDisplayName(), err)
+			os.Exit(1)
+		}
+		fmt.Printf("✓ Launched %s\n", launcher.AppDisplayName())
 
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", cmd)

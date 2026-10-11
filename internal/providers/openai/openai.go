@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -941,4 +942,33 @@ func FindCodexBinary() string {
 		}
 	}
 	return "codex"
+}
+
+// LaunchApp launches the ChatGPT Desktop application via codex app or system opener.
+func (p *Provider) LaunchApp() error {
+	bin := p.codexBin
+	if bin == "" {
+		bin = FindCodexBinary()
+	}
+	if bin != "" {
+		cmd := exec.Command(bin, "app")
+		if err := cmd.Start(); err == nil {
+			return nil
+		}
+	}
+	if runtime.GOOS == "darwin" {
+		cmd := exec.Command("open", "-a", "ChatGPT")
+		if err := cmd.Start(); err == nil {
+			return nil
+		}
+		cmd = exec.Command("open", "/Applications/ChatGPT.app")
+		if err := cmd.Start(); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("unable to launch desktop app via '%s app' or system opener", bin)
+}
+
+func (p *Provider) AppDisplayName() string {
+	return "ChatGPT Desktop"
 }

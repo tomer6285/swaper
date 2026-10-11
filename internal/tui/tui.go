@@ -368,6 +368,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.launching = true
 				return m, tea.Quit
 			}
+
+		case "O":
+			if launcher, ok := m.provider.(provider.AppLauncher); ok {
+				if err := launcher.LaunchApp(); err != nil {
+					m.statusMsg = fmt.Sprintf("Failed to launch %s: %v", launcher.AppDisplayName(), err)
+				} else {
+					m.statusMsg = fmt.Sprintf("Launched %s ✓", launcher.AppDisplayName())
+				}
+				m.statusMsgID++
+				return m, m.clearStatusTimerCmd(m.statusMsgID, 4*time.Second)
+			}
+			m.statusMsg = "No desktop app available for this provider."
+			m.statusMsgID++
+			return m, m.clearStatusTimerCmd(m.statusMsgID, 3*time.Second)
 		}
 	}
 
@@ -386,7 +400,11 @@ func (m Model) View() string {
 
 	// Header
 	headerLeft := titleStyle.Render(fmt.Sprintf("swaper — %s", m.provider.DisplayName()))
-	hints := "q: quit  r: refresh  i: import  R: rename  enter: switch  o: open"
+	openHint := "o: open"
+	if _, ok := m.provider.(provider.AppLauncher); ok {
+		openHint = "o: cli  O: app"
+	}
+	hints := fmt.Sprintf("q: quit  r: refresh  i: import  R: rename  enter: switch  %s", openHint)
 	if len(m.providers) > 1 {
 		hints = "Tab: provider  " + hints
 	}
