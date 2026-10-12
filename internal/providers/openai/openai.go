@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -944,18 +945,105 @@ func FindCodexBinary() string {
 	return "codex"
 }
 
-// LaunchApp launches the ChatGPT Desktop application via codex app or system opener.
-func (p *Provider) LaunchApp() error {
-	bin := p.codexBin
-	if bin == "" {
-		bin = FindCodexBinary()
+// LaunchAppDetailed checks whether ChatGPT Desktop is running, whether it is logged in with
+// the active account, verifies there are no tasks running, and starts or restarts it accordingly.
+func (p *Provider) LaunchAppDetailed() (string, error) {
+	if runtime.GOOS != "darwin" {
+		if err := p.openChatGPTApp(); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Launched %s ✓", p.AppDisplayName()), nil
 	}
-	if bin != "" {
-		cmd := exec.Command(bin, "app")
-		if err := cmd.Start(); err == nil {
-			return nil
+
+	running, _ := isChatGPTAppRunning()
+	if !running {
+		if err := p.openChatGPTApp(); err != nil {
+			return "", err
+		}
+		activeID := p.getActiveProfileName()
+		if activeID != "" {
+			_ = p.setLastLaunchedAppProfile(activeID)
+		}
+		return fmt.Sprintf("Launched %s ✓", p.AppDisplayName()), nil
+	}
+
+	// ChatGPT is already running. Check active profile vs running session account.
+	activeID := p.getActiveProfileName()
+	if activeID == "" {
+		_ = p.openChatGPTApp()
+		return fmt.Sprintf("%s is already running ✓", p.AppDisplayName()), nil
+	}
+
+	targetAuth, err := p.loadProfile(activeID)
+	if err != nil {
+		_ = p.openChatGPTApp()
+		return "", fmt.Errorf("failed to load active profile '%s': %w", activeID, err)
+	}
+
+	targetAccountID := extractAccountIDFromCodexAuth(targetAuth)
+	targetEmail := strings.ToLower(strings.TrimSpace(extractEmailFromCodexAuth(targetAuth)))
+
+	runningAccountID, runningEmail := getRunningChatGPTAccountInfo()
+	lastLaunched := p.getLastLaunchedAppProfile()
+
+	isRightAccount := false
+	if runningAccountID != "" && targetAccountID != "" {
+		isRightAccount = (runningAccountID == targetAccountID)
+	} else if runningEmail != "" && targetEmail != "" {
+		isRightAccount = (runningEmail == targetEmail)
+	} else if lastLaunched != "" {
+		isRightAccount = (lastLaunched == activeID)
+	}
+
+	if isRightAccount {
+		// Already open and logged in with right account: do nothing (just focus the window)
+		_ = p.openChatGPTApp()
+		return fmt.Sprintf("%s is already running with active account (%s) ✓", p.AppDisplayName(), activeID), nil
+	}
+
+	// App is running on a different account.
+	// Step 1: Pre-check if there are currently running tasks/tools.
+	if busy, reason := hasRunningChatGPTTasks(); busy {
+		return "", fmt.Errorf("cannot restart: %s", reason)
+	}
+
+	// Step 2: Gracefully quit via AppleScript with a timeout handshake.
+	quitCmd := exec.Command("osascript", "-e", `tell application "ChatGPT" to quit`)
+	if err := quitCmd.Run(); err != nil {
+		return "", fmt.Errorf("failed to request %s to quit: %w", p.AppDisplayName(), err)
+	}
+
+	deadline := time.Now().Add(1500 * time.Millisecond)
+	exited := false
+	for time.Now().Before(deadline) {
+		time.Sleep(100 * time.Millisecond)
+		isStillRunning, _ := isChatGPTAppRunning()
+		if !isStillRunning {
+			exited = true
+			break
 		}
 	}
+
+	if !exited {
+		// Do NOT force-kill!
+		return "", fmt.Errorf("cannot restart %s: quit was blocked (conversation or task in progress)", p.AppDisplayName())
+	}
+
+	time.Sleep(200 * time.Millisecond)
+	if err := p.openChatGPTApp(); err != nil {
+		return "", fmt.Errorf("failed to relaunch %s: %w", p.AppDisplayName(), err)
+	}
+	_ = p.setLastLaunchedAppProfile(activeID)
+	return fmt.Sprintf("Restarted %s with active account (%s) ✓", p.AppDisplayName(), activeID), nil
+}
+
+// LaunchApp launches the ChatGPT Desktop application via smart launcher.
+func (p *Provider) LaunchApp() error {
+	_, err := p.LaunchAppDetailed()
+	return err
+}
+
+func (p *Provider) openChatGPTApp() error {
 	if runtime.GOOS == "darwin" {
 		cmd := exec.Command("open", "-a", "ChatGPT")
 		if err := cmd.Start(); err == nil {
@@ -966,9 +1054,133 @@ func (p *Provider) LaunchApp() error {
 			return nil
 		}
 	}
-	return fmt.Errorf("unable to launch desktop app via '%s app' or system opener", bin)
+	bin := p.codexBin
+	if bin == "" {
+		bin = FindCodexBinary()
+	}
+	if bin != "" {
+		cmd := exec.Command(bin, "app")
+		if err := cmd.Start(); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("unable to launch desktop app via system opener or '%s app'", bin)
+}
+
+func (p *Provider) setLastLaunchedAppProfile(id string) error {
+	path := filepath.Join(p.storageDir, "app_profile.txt")
+	return os.WriteFile(path, []byte(id), 0600)
+}
+
+func (p *Provider) getLastLaunchedAppProfile() string {
+	path := filepath.Join(p.storageDir, "app_profile.txt")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func isChatGPTAppRunning() (bool, int) {
+	if runtime.GOOS != "darwin" {
+		return false, 0
+	}
+	out, err := exec.Command("pgrep", "-x", "ChatGPT").Output()
+	if err != nil {
+		return false, 0
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) == 0 {
+		return false, 0
+	}
+	pid, _ := strconv.Atoi(fields[0])
+	return true, pid
+}
+
+type sentryScopeFile struct {
+	Scope struct {
+		User struct {
+			ID        string `json:"id"`
+			AccountID string `json:"account_id"`
+			Email     string `json:"email"`
+		} `json:"user"`
+	} `json:"scope"`
+}
+
+func getRunningChatGPTAccountInfo() (accountID, email string) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", ""
+	}
+	path := filepath.Join(home, "Library", "Application Support", "Codex", "sentry", "scope_v3.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", ""
+	}
+	var scope sentryScopeFile
+	if err := json.Unmarshal(data, &scope); err != nil {
+		return "", ""
+	}
+	return scope.Scope.User.AccountID, strings.ToLower(strings.TrimSpace(scope.Scope.User.Email))
+}
+
+func hasRunningChatGPTTasks() (bool, string) {
+	if runtime.GOOS != "darwin" {
+		return false, ""
+	}
+
+	// 1. Check if codex app-server has running child processes (command/tool execution)
+	out, err := exec.Command("pgrep", "-f", "codex.*app-server").Output()
+	if err == nil {
+		for _, line := range strings.Fields(string(out)) {
+			codexPID, _ := strconv.Atoi(line)
+			if codexPID > 0 {
+				children, err := exec.Command("pgrep", "-P", strconv.Itoa(codexPID)).Output()
+				if err == nil && len(strings.TrimSpace(string(children))) > 0 {
+					return true, "a command or tool is currently executing in ChatGPT"
+				}
+			}
+		}
+	}
+
+	// 2. Check if sentry scope indicates an in-flight turn generating
+	home, err := os.UserHomeDir()
+	if err == nil {
+		scopePath := filepath.Join(home, "Library", "Application Support", "Codex", "sentry", "scope_v3.json")
+		if data, err := os.ReadFile(scopePath); err == nil {
+			content := string(data)
+			if strings.Contains(content, `"thread_count_with_inflight_turn":`) {
+				re := regexp.MustCompile(`"thread_count_with_inflight_turn":\s*([1-9]\d*)`)
+				if re.MatchString(content) {
+					return true, "an AI conversation turn is currently generating in ChatGPT"
+				}
+			}
+		}
+	}
+
+	return false, ""
+}
+
+func extractAccountIDFromCodexAuth(auth *CodexAuth) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Tokens.AccountID != "" {
+		return auth.Tokens.AccountID
+	}
+	claims := extractClaimsFromJWT(auth.Tokens.IDToken)
+	if len(claims) == 0 {
+		claims = extractClaimsFromJWT(auth.Tokens.AccessToken)
+	}
+	if authClaim, ok := claims["https://api.openai.com/auth"].(map[string]interface{}); ok {
+		if accID, ok := authClaim["chatgpt_account_id"].(string); ok && accID != "" {
+			return accID
+		}
+	}
+	return ""
 }
 
 func (p *Provider) AppDisplayName() string {
 	return "ChatGPT Desktop"
 }
+

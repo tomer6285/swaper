@@ -199,4 +199,44 @@ func TestOpenAIAppLauncher(t *testing.T) {
 	if launcher.AppDisplayName() != "ChatGPT Desktop" {
 		t.Errorf("expected AppDisplayName 'ChatGPT Desktop', got %q", launcher.AppDisplayName())
 	}
+	var detailedLauncher provider.DetailedAppLauncher = p
+	if detailedLauncher.AppDisplayName() != "ChatGPT Desktop" {
+		t.Errorf("expected DetailedAppLauncher display name 'ChatGPT Desktop', got %q", detailedLauncher.AppDisplayName())
+	}
 }
+
+func TestExtractAccountIDFromCodexAuth(t *testing.T) {
+	authWithDirectID := &CodexAuth{
+		Tokens: CodexTokens{
+			AccountID: "acc-12345",
+		},
+	}
+	if id := extractAccountIDFromCodexAuth(authWithDirectID); id != "acc-12345" {
+		t.Errorf("expected acc-12345, got %q", id)
+	}
+
+	if id := extractAccountIDFromCodexAuth(nil); id != "" {
+		t.Errorf("expected empty string for nil auth, got %q", id)
+	}
+}
+
+func TestAppProfilePersistence(t *testing.T) {
+	tmpDir := t.TempDir()
+	p, err := NewProvider(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to create provider: %v", err)
+	}
+
+	if got := p.getLastLaunchedAppProfile(); got != "" {
+		t.Errorf("expected empty initially, got %q", got)
+	}
+
+	if err := p.setLastLaunchedAppProfile("personal"); err != nil {
+		t.Fatalf("setLastLaunchedAppProfile failed: %v", err)
+	}
+
+	if got := p.getLastLaunchedAppProfile(); got != "personal" {
+		t.Errorf("expected 'personal', got %q", got)
+	}
+}
+

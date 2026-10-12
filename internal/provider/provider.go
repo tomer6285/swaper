@@ -58,3 +58,9 @@ type AppLauncher interface {
 	LaunchApp() error
 	AppDisplayName() string
 }
+
+// DetailedAppLauncher is an optional interface for providers that provide detailed feedback upon launch/restart.
+type DetailedAppLauncher interface {
+	AppLauncher
+	LaunchAppDetailed() (string, error)
+}

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -158,4 +159,62 @@ func TestShiftONoDesktopApp(t *testing.T) {
 		t.Errorf("expected 'No desktop app available', got %q", updated.statusMsg)
 	}
 }
+
+type dummyDetailedLauncherProvider struct {
+	dummyProvider
+	launchMsg string
+	launchErr error
+	called    bool
+}
+
+func (d *dummyDetailedLauncherProvider) LaunchApp() error {
+	d.called = true
+	return d.launchErr
+}
+
+func (d *dummyDetailedLauncherProvider) LaunchAppDetailed() (string, error) {
+	d.called = true
+	return d.launchMsg, d.launchErr
+}
+
+func (d *dummyDetailedLauncherProvider) AppDisplayName() string {
+	return "Smart App"
+}
+
+func TestShiftODetailedAppLauncherSuccess(t *testing.T) {
+	dlp := &dummyDetailedLauncherProvider{
+		dummyProvider: dummyProvider{id: "p1", name: "Provider 1"},
+		launchMsg:     "Restarted Smart App with active account (work) ✓",
+	}
+	m := NewModel(config.Config{}, dlp)
+
+	newM, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'O'}})
+	updated := newM.(Model)
+
+	if !dlp.called {
+		t.Errorf("expected LaunchAppDetailed to be called")
+	}
+	if updated.statusMsg != "Restarted Smart App with active account (work) ✓" {
+		t.Errorf("expected exact status message, got %q", updated.statusMsg)
+	}
+}
+
+func TestShiftODetailedAppLauncherError(t *testing.T) {
+	dlp := &dummyDetailedLauncherProvider{
+		dummyProvider: dummyProvider{id: "p1", name: "Provider 1"},
+		launchErr:     fmt.Errorf("cannot restart: tool is executing"),
+	}
+	m := NewModel(config.Config{}, dlp)
+
+	newM, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'O'}})
+	updated := newM.(Model)
+
+	if !dlp.called {
+		t.Errorf("expected LaunchAppDetailed to be called")
+	}
+	if !strings.Contains(updated.statusMsg, "Failed to launch Smart App: cannot restart: tool is executing") {
+		t.Errorf("expected error in status message, got %q", updated.statusMsg)
+	}
+}
+
 

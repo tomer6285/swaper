@@ -370,6 +370,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "O":
+			if dl, ok := m.provider.(provider.DetailedAppLauncher); ok {
+				msg, err := dl.LaunchAppDetailed()
+				if err != nil {
+					m.statusMsg = fmt.Sprintf("Failed to launch %s: %v", dl.AppDisplayName(), err)
+				} else if msg != "" {
+					m.statusMsg = msg
+				} else {
+					m.statusMsg = fmt.Sprintf("Launched %s ✓", dl.AppDisplayName())
+				}
+				m.statusMsgID++
+				return m, m.clearStatusTimerCmd(m.statusMsgID, 4*time.Second)
+			}
 			if launcher, ok := m.provider.(provider.AppLauncher); ok {
 				if err := launcher.LaunchApp(); err != nil {
 					m.statusMsg = fmt.Sprintf("Failed to launch %s: %v", launcher.AppDisplayName(), err)

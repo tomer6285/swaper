@@ -381,6 +381,19 @@ func main() {
 		}
 
 	case "app":
+		if dl, ok := p.(provider.DetailedAppLauncher); ok {
+			msg, err := dl.LaunchAppDetailed()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			if msg != "" {
+				fmt.Println(msg)
+			} else {
+				fmt.Printf("✓ Launched %s\n", dl.AppDisplayName())
+			}
+			return
+		}
 		launcher, ok := p.(provider.AppLauncher)
 		if !ok {
 			fmt.Fprintf(os.Stderr, "Provider '%s' does not have a desktop app.\n", p.DisplayName())
