@@ -27,6 +27,8 @@ var (
 	dimStyle           = lipgloss.NewStyle().Foreground(subtleColor)
 	boxStyle           = lipgloss.NewStyle().BorderStyle(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#444466")).Padding(0, 1)
 	selectedBox        = lipgloss.NewStyle().BorderStyle(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#7D56F4")).Padding(0, 1)
+	tabActiveStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#00FFA3"))
+	tabDimStyle        = lipgloss.NewStyle().Foreground(subtleColor)
 )
 
 // Messages
@@ -612,16 +614,8 @@ func (m Model) View() string {
 	var sb strings.Builder
 
 	// Header
-	headerLeft := titleStyle.Render(fmt.Sprintf("swaper — %s", m.provider.DisplayName()))
-	openHint := "o: open"
-	if _, ok := m.provider.(provider.AppLauncher); ok {
-		openHint = "o: cli  O: app"
-	}
-	hints := fmt.Sprintf("q: quit  r: refresh  /: filter  a: add  d: del  enter: switch  %s  ?: help", openHint)
-	if len(m.providers) > 1 {
-		hints = "Tab: provider  " + hints
-	}
-	headerRight := dimStyle.Render(hints)
+	headerLeft := m.renderHeaderLeft()
+	headerRight := m.renderHeaderRight()
 	gap := max(2, m.width-lipgloss.Width(headerLeft)-lipgloss.Width(headerRight))
 	sb.WriteString(headerLeft + strings.Repeat(" ", gap) + headerRight + "\n\n")
 
@@ -661,6 +655,81 @@ func (m Model) View() string {
 	}
 
 	return sb.String()
+}
+
+func providerDisplayName(p provider.Provider) string {
+	switch p.ID() {
+	case "antigravity":
+		return "Antigravity"
+	case "openai":
+		return "OpenAI"
+	default:
+		name := p.DisplayName()
+		if len(name) > 0 {
+			return strings.ToUpper(name[:1]) + name[1:]
+		}
+		return name
+	}
+}
+
+func (m Model) renderHeaderLeft() string {
+	title := titleStyle.Render("swaper")
+	if len(m.providers) <= 1 {
+		pName := providerDisplayName(m.provider)
+		return fmt.Sprintf("%s %s", title, dimStyle.Render("— "+pName))
+	}
+
+	// For very narrow terminals (< 70 columns), show only the active provider tab
+	if m.width > 0 && m.width < 70 {
+		return fmt.Sprintf("%s %s %s", title, dimStyle.Render("│"), tabActiveStyle.Render("[● "+providerDisplayName(m.provider)+"]"))
+	}
+
+	var tabs []string
+	for i, p := range m.providers {
+		name := providerDisplayName(p)
+		if i == m.providerIdx {
+			tabs = append(tabs, tabActiveStyle.Render("[● "+name+"]"))
+		} else {
+			tabs = append(tabs, tabDimStyle.Render("○ "+name))
+		}
+	}
+
+	tabStr := strings.Join(tabs, "  ")
+	if m.width == 0 || m.width >= 85 {
+		tabStr += " " + dimStyle.Render("(Tab ⇄)")
+	}
+
+	return fmt.Sprintf("%s %s %s", title, dimStyle.Render("│"), tabStr)
+}
+
+func (m Model) renderHeaderRight() string {
+	hasLauncher := false
+	if _, ok := m.provider.(provider.AppLauncher); ok {
+		hasLauncher = true
+	}
+
+	var parts []string
+	parts = append(parts, "enter: switch")
+	if hasLauncher {
+		parts = append(parts, "o: cli", "O: app")
+	} else {
+		parts = append(parts, "o: open")
+	}
+	parts = append(parts, "?: help")
+
+	if m.width == 0 || m.width >= 95 {
+		parts = append(parts, "q: quit")
+	}
+
+	if m.width > 0 && m.width < 75 {
+		if hasLauncher {
+			parts = []string{"o: cli", "O: app", "?: help"}
+		} else {
+			parts = []string{"o: open", "?: help"}
+		}
+	}
+
+	return dimStyle.Render(strings.Join(parts, "  "))
 }
 
 // FilteredAccounts returns accounts filtered by real-time search query.
@@ -790,8 +859,16 @@ func (m Model) renderHelpModal() string {
 
 	lines = append(lines, secHeader.Render("Actions & Launcher"))
 	lines = append(lines, row("r", "Force refresh quota metrics"))
-	lines = append(lines, row("o", "Launch provider CLI in-place"))
-	lines = append(lines, row("O", "Launch provider desktop application"))
+	cliDesc := "Launch provider CLI in-place"
+	if bin := m.provider.CLIBinary(); bin != "" {
+		cliDesc = fmt.Sprintf("Launch %s CLI in-place", bin)
+	}
+	lines = append(lines, row("o", cliDesc))
+	appDesc := "Launch provider desktop application"
+	if launcher, ok := m.provider.(provider.AppLauncher); ok {
+		appDesc = fmt.Sprintf("Launch %s desktop app", launcher.AppDisplayName())
+	}
+	lines = append(lines, row("O", appDesc))
 	lines = append(lines, row("?", "Toggle this help modal"))
 	lines = append(lines, row("q / Ctrl+C", "Quit swaper"))
 	lines = append(lines, "")

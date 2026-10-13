@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"swaper/internal/config"
 	"swaper/internal/provider"
 )
@@ -508,6 +509,83 @@ func TestAggregateQuotaSummarySingleAndLoading(t *testing.T) {
 	expected := "1 active profile • Combined: ~2.5 hours of continuous coding quota remaining"
 	if singleSummary != expected {
 		t.Errorf("expected %q, got %q", expected, singleSummary)
+	}
+}
+
+func TestHeaderProviderTabsAndHintsAntigravityAndOpenAI(t *testing.T) {
+	pAgy := &dummyDetailedLauncherProvider{
+		dummyProvider: dummyProvider{id: "antigravity", name: "antigravity"},
+	}
+	pOpenAI := &dummyDetailedLauncherProvider{
+		dummyProvider: dummyProvider{id: "openai", name: "openai"},
+	}
+
+	m := NewModel(config.Config{}, pAgy, pOpenAI)
+	m.width = 100
+
+	view := m.View()
+	firstLine := strings.Split(view, "\n")[0]
+
+	// Verify Antigravity is active tab and OpenAI is inactive
+	if !strings.Contains(firstLine, "[● Antigravity]") {
+		t.Errorf("expected active tab '[● Antigravity]', got:\n%s", firstLine)
+	}
+	if !strings.Contains(firstLine, "○ OpenAI") {
+		t.Errorf("expected inactive tab '○ OpenAI', got:\n%s", firstLine)
+	}
+	if !strings.Contains(firstLine, "O: app") {
+		t.Errorf("expected 'O: app' hint, got:\n%s", firstLine)
+	}
+	if !strings.Contains(firstLine, "o: cli") {
+		t.Errorf("expected 'o: cli' hint, got:\n%s", firstLine)
+	}
+	if !strings.Contains(firstLine, "?: help") {
+		t.Errorf("expected '?: help' hint, got:\n%s", firstLine)
+	}
+
+	// Press Tab to switch to OpenAI
+	newM, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	mOpenAI := newM.(Model)
+	viewOpenAI := mOpenAI.View()
+	firstLineOpenAI := strings.Split(viewOpenAI, "\n")[0]
+
+	// Verify OpenAI is active tab and Antigravity is inactive
+	if !strings.Contains(firstLineOpenAI, "[● OpenAI]") {
+		t.Errorf("expected active tab '[● OpenAI]', got:\n%s", firstLineOpenAI)
+	}
+	if !strings.Contains(firstLineOpenAI, "○ Antigravity") {
+		t.Errorf("expected inactive tab '○ Antigravity', got:\n%s", firstLineOpenAI)
+	}
+	if !strings.Contains(firstLineOpenAI, "O: app") {
+		t.Errorf("expected 'O: app' hint on OpenAI page, got:\n%s", firstLineOpenAI)
+	}
+	if !strings.Contains(firstLineOpenAI, "o: cli") {
+		t.Errorf("expected 'o: cli' hint on OpenAI page, got:\n%s", firstLineOpenAI)
+	}
+}
+
+func TestHeaderWidthResponsiveDoesNotOverflow(t *testing.T) {
+	pAgy := &dummyDetailedLauncherProvider{
+		dummyProvider: dummyProvider{id: "antigravity", name: "antigravity"},
+	}
+	pOpenAI := &dummyDetailedLauncherProvider{
+		dummyProvider: dummyProvider{id: "openai", name: "openai"},
+	}
+
+	for _, width := range []int{80, 90, 100, 120} {
+		m := NewModel(config.Config{}, pAgy, pOpenAI)
+		m.width = width
+		view := m.View()
+		firstLine := strings.Split(view, "\n")[0]
+
+		lineWidth := lipgloss.Width(firstLine)
+		if lineWidth > width {
+			t.Errorf("at width %d, header line width is %d which overflows: %q", width, lineWidth, firstLine)
+		}
+
+		if !strings.Contains(firstLine, "O: app") {
+			t.Errorf("at width %d, expected 'O: app' to remain visible, got: %q", width, firstLine)
+		}
 	}
 }
 

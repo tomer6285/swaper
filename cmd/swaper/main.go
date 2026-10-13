@@ -31,7 +31,7 @@ Usage:
   swaper rename <old> <new> Rename a profile
   swaper remove <name>   Remove a profile
   swaper open            Launch provider CLI using active account
-  swaper app             Launch provider desktop app (e.g. ChatGPT Desktop)
+  swaper app             Launch provider desktop app (Antigravity, ChatGPT Desktop)
   swaper provider [name] Show or set default provider (antigravity, openai)
 
 Options:
