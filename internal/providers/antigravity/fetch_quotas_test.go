@@ -156,3 +156,13 @@ func TestFetchPlanTierFallsBack(t *testing.T) {
 		t.Fatalf("all-fail tier should be Standard, got %q", got)
 	}
 }
+
+func TestAntigravityLoginCommandReturnsNil(t *testing.T) {
+	p, err := NewProvider(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cmd := p.LoginCommand(); cmd != nil {
+		t.Fatalf("expected Antigravity LoginCommand to return nil, got %v", cmd)
+	}
+}

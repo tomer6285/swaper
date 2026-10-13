@@ -208,7 +208,11 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Add failed: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("✓ Created profile placeholder '%s' for %s.\nRun '%s login' then 'swaper import %s' to save its credentials.\n", acc.ID, p.DisplayName(), p.CLIBinary(), name)
+		if loginCmd := p.LoginCommand(); len(loginCmd) > 0 {
+			fmt.Printf("✓ Created profile placeholder '%s' for %s.\nRun '%s' then 'swaper import %s' to save its credentials.\n", acc.ID, p.DisplayName(), strings.Join(loginCmd, " "), name)
+		} else {
+			fmt.Printf("✓ Created profile placeholder '%s' for %s.\nLog in using %s (run /logout first if already signed in), then run 'swaper import %s' to save its credentials.\n", acc.ID, p.DisplayName(), p.CLIBinary(), name)
+		}
 
 	case "rename":
 		if len(cleanArgs) < 4 {

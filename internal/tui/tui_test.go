@@ -63,6 +63,7 @@ type dummyProvider struct {
 	removedAccount string
 	importedName   string
 	importedEmail  string
+	noLoginCmd     bool
 }
 
 func (d *dummyProvider) ID() string                                                               { return d.id }
@@ -88,7 +89,12 @@ func (d *dummyProvider) RenameAccount(oldID, newID string) error                
 func (d *dummyProvider) ActiveAccount() (*provider.StoredAccount, error)                          { return nil, nil }
 func (d *dummyProvider) IsCLIRunning() (bool, error)                                              { return false, nil }
 func (d *dummyProvider) LaunchCLI(acc provider.StoredAccount) error                               { return nil }
-func (d *dummyProvider) LoginCommand() []string                                                   { return []string{"true"} }
+func (d *dummyProvider) LoginCommand() []string {
+	if d.noLoginCmd {
+		return nil
+	}
+	return []string{"true"}
+}
 func (d *dummyProvider) InvalidateCache()                                                         {}
 
 func TestTabSwitchesProviderWithoutStatusText(t *testing.T) {
@@ -433,6 +439,22 @@ func TestAddAndLoginPromptAndCompletion(t *testing.T) {
 	}
 	if !strings.Contains(postLogin.statusMsg, "Added and logged in as 'dev-account' ✓") {
 		t.Errorf("expected success status message, got %q", postLogin.statusMsg)
+	}
+}
+
+func TestAddWhenNoLoginCommand(t *testing.T) {
+	dp := &dummyProvider{id: "agy", name: "antigravity", noLoginCmd: true}
+	m := NewModel(config.Config{}, dp)
+
+	// Press 'a'
+	newM, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	updated := newM.(Model)
+
+	if updated.inputMode {
+		t.Fatalf("expected inputMode=false when no login command, got true")
+	}
+	if !strings.Contains(updated.statusMsg, "has no CLI login command") {
+		t.Errorf("expected statusMsg to explain missing login command, got %q", updated.statusMsg)
 	}
 }
 

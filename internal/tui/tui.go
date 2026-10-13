@@ -339,9 +339,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case "add_login":
 					cmdArgs := m.provider.LoginCommand()
 					if len(cmdArgs) == 0 {
-						m.statusMsg = "No login command configured for this provider."
+						m.statusMsg = fmt.Sprintf("No login command configured for '%s'. Sign in via %s, then press 'i' to import.", m.provider.DisplayName(), m.provider.CLIBinary())
 						m.statusMsgID++
-						return m, m.clearStatusTimerCmd(m.statusMsgID, 3*time.Second)
+						return m, m.clearStatusTimerCmd(m.statusMsgID, 5*time.Second)
 					}
 					c := exec.Command(cmdArgs[0], cmdArgs[1:]...)
 					return m, tea.ExecProcess(c, func(err error) tea.Msg {
@@ -492,6 +492,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "a":
+			cmdArgs := m.provider.LoginCommand()
+			if len(cmdArgs) == 0 {
+				m.statusMsg = fmt.Sprintf("'%s' has no CLI login command. Sign in via %s (use /logout if needed), then press 'i' to import.", m.provider.DisplayName(), m.provider.CLIBinary())
+				m.statusMsgID++
+				return m, m.clearStatusTimerCmd(m.statusMsgID, 5*time.Second)
+			}
 			m.inputMode = true
 			m.inputAction = "add_login"
 			m.inputPrompt = "Enter profile name for login (leave blank to auto-detect): "
@@ -637,8 +643,10 @@ func (m Model) View() string {
 	if len(filtered) == 0 {
 		if m.filterQuery != "" {
 			sb.WriteString(dimStyle.Render(fmt.Sprintf("No accounts found matching %q. Press Esc to clear filter.\n", m.filterQuery)))
-		} else {
+		} else if len(m.provider.LoginCommand()) > 0 {
 			sb.WriteString("No accounts configured yet. Press 'a' to add & login, or 'i' to import current session.\n")
+		} else {
+			sb.WriteString("No accounts configured yet. Press 'i' to import current session.\n")
 		}
 	} else {
 		for i, acc := range filtered {

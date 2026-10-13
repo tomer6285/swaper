@@ -351,7 +351,7 @@ func (p *Provider) SwitchTo(account provider.StoredAccount) error {
 		return fmt.Errorf("failed to load target profile '%s': %w", account.ID, err)
 	}
 	if !accounts.HasCredentials(targetAuth) {
-		return fmt.Errorf("profile '%s' has no saved credentials (empty placeholder) — run 'agy auth login' then 'swaper import %s' first", account.ID, account.ID)
+		return fmt.Errorf("profile '%s' has no saved credentials (empty placeholder) — log into %s first, then run 'swaper import %s'", account.ID, p.CLIBinary(), account.ID)
 	}
 
 	// Step 2: Reconcile the LIVE session before touching anything.
@@ -896,12 +896,10 @@ func (p *Provider) LaunchCLI(account provider.StoredAccount) error {
 }
 
 // LoginCommand returns the CLI invocation to run interactive login for Antigravity.
+// Since agy has no standalone login subcommand (authentication is handled inside
+// the interactive CLI session or after running /logout), this returns nil.
 func (p *Provider) LoginCommand() []string {
-	bin, err := exec.LookPath("agy")
-	if err != nil {
-		bin = "agy"
-	}
-	return []string{bin, "auth", "login"}
+	return nil
 }
 
 // AppDisplayName returns the user-facing name for the Antigravity desktop application.
