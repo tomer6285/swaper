@@ -454,7 +454,25 @@ func (p *Provider) ImportCurrent(id, email string) (*provider.StoredAccount, err
 		if existingID != "" {
 			id = existingID
 		} else {
-			id = "default"
+			baseName := "default"
+			if email != "" {
+				parts := strings.Split(email, "@")
+				if len(parts) > 0 && parts[0] != "" {
+					baseName = strings.ToLower(parts[0])
+					baseName = strings.ReplaceAll(baseName, ".", "-")
+					baseName = strings.ReplaceAll(baseName, "/", "-")
+				}
+			}
+			if err := accounts.ValidateProfileName(baseName); err != nil {
+				baseName = "default"
+			}
+			id = baseName
+			for i := 2; ; i++ {
+				if _, err := p.loadProfile(id); err != nil {
+					break
+				}
+				id = fmt.Sprintf("%s-%d", baseName, i)
+			}
 		}
 	}
 	if err := accounts.ValidateProfileName(id); err != nil {
@@ -908,6 +926,18 @@ func (p *Provider) LaunchCLI(account provider.StoredAccount) error {
 		return fmt.Errorf("codex executable not found: %w", err)
 	}
 	return syscall.Exec(fullPath, []string{bin}, os.Environ())
+}
+
+// LoginCommand returns the CLI invocation to run interactive login for OpenAI/Codex.
+func (p *Provider) LoginCommand() []string {
+	bin := p.codexBin
+	if bin == "" {
+		bin = FindCodexBinary()
+	}
+	if bin == "" {
+		bin = "codex"
+	}
+	return []string{bin, "login"}
 }
 
 // FindCodexBinary searches known system and application paths for the codex binary.

@@ -205,7 +205,25 @@ func (p *Provider) ImportCurrent(id, email string) (*provider.StoredAccount, err
 		if existingID != "" {
 			id = existingID
 		} else {
-			id = "default"
+			baseName := "default"
+			if email != "" {
+				parts := strings.Split(email, "@")
+				if len(parts) > 0 && parts[0] != "" {
+					baseName = strings.ToLower(parts[0])
+					baseName = strings.ReplaceAll(baseName, ".", "-")
+					baseName = strings.ReplaceAll(baseName, "/", "-")
+				}
+			}
+			if err := accounts.ValidateProfileName(baseName); err != nil {
+				baseName = "default"
+			}
+			id = baseName
+			for i := 2; ; i++ {
+				if _, err := p.store.LoadProfile(id); err != nil {
+					break
+				}
+				id = fmt.Sprintf("%s-%d", baseName, i)
+			}
 		}
 	}
 	if err := accounts.ValidateProfileName(id); err != nil {
@@ -868,3 +886,13 @@ func (p *Provider) LaunchCLI(account provider.StoredAccount) error {
 	// Replace process
 	return syscall.Exec(agyPath, []string{"agy"}, os.Environ())
 }
+
+// LoginCommand returns the CLI invocation to run interactive login for Antigravity.
+func (p *Provider) LoginCommand() []string {
+	bin, err := exec.LookPath("agy")
+	if err != nil {
+		bin = "agy"
+	}
+	return []string{bin, "auth", "login"}
+}
+

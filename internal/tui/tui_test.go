@@ -57,8 +57,11 @@ func TestRenderAccountCardSpacing(t *testing.T) {
 }
 
 type dummyProvider struct {
-	id   string
-	name string
+	id             string
+	name           string
+	removedAccount string
+	importedName   string
+	importedEmail  string
 }
 
 func (d *dummyProvider) ID() string                                                               { return d.id }
@@ -70,13 +73,21 @@ func (d *dummyProvider) FetchStatus(ctx context.Context, acc provider.StoredAcco
 }
 func (d *dummyProvider) CachedStatus(id string) (provider.AccountStatus, bool)                    { return provider.AccountStatus{}, false }
 func (d *dummyProvider) SwitchTo(acc provider.StoredAccount) error                                { return nil }
-func (d *dummyProvider) ImportCurrent(id, email string) (*provider.StoredAccount, error)          { return nil, nil }
+func (d *dummyProvider) ImportCurrent(id, email string) (*provider.StoredAccount, error) {
+	d.importedName = id
+	d.importedEmail = email
+	return &provider.StoredAccount{ID: id, Email: email, IsActive: true}, nil
+}
 func (d *dummyProvider) AddNew(id, email string) (*provider.StoredAccount, error)                 { return nil, nil }
-func (d *dummyProvider) RemoveAccount(id string) error                                            { return nil }
+func (d *dummyProvider) RemoveAccount(id string) error {
+	d.removedAccount = id
+	return nil
+}
 func (d *dummyProvider) RenameAccount(oldID, newID string) error                                  { return nil }
 func (d *dummyProvider) ActiveAccount() (*provider.StoredAccount, error)                          { return nil, nil }
 func (d *dummyProvider) IsCLIRunning() (bool, error)                                              { return false, nil }
 func (d *dummyProvider) LaunchCLI(acc provider.StoredAccount) error                               { return nil }
+func (d *dummyProvider) LoginCommand() []string                                                   { return []string{"true"} }
 func (d *dummyProvider) InvalidateCache()                                                         {}
 
 func TestTabSwitchesProviderWithoutStatusText(t *testing.T) {
@@ -216,5 +227,289 @@ func TestShiftODetailedAppLauncherError(t *testing.T) {
 		t.Errorf("expected error in status message, got %q", updated.statusMsg)
 	}
 }
+
+func TestDeleteAccountModalAndConfirm(t *testing.T) {
+	dp := &dummyProvider{id: "p1", name: "Provider 1"}
+	m := NewModel(config.Config{}, dp)
+	m.accounts = []provider.StoredAccount{
+		{ID: "personal", Email: "personal@example.com"},
+		{ID: "work", Email: "work@example.com"},
+	}
+	m.cursor = 1 // select "work"
+
+	// Press 'd'
+	newM, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	updated := newM.(Model)
+
+	if !updated.confirmDelete {
+		t.Fatalf("expected confirmDelete to be true")
+	}
+	if updated.deleteTarget == nil || updated.deleteTarget.ID != "work" {
+		t.Fatalf("expected deleteTarget to be 'work', got: %v", updated.deleteTarget)
+	}
+
+	view := updated.View()
+	if !strings.Contains(view, "Delete Account Confirmation") {
+		t.Errorf("expected view to contain 'Delete Account Confirmation', got:\n%s", view)
+	}
+	if !strings.Contains(view, "work") {
+		t.Errorf("expected view to contain target profile 'work', got:\n%s", view)
+	}
+	if !strings.Contains(view, "[y] Confirm Delete") {
+		t.Errorf("expected view to contain confirm hints, got:\n%s", view)
+	}
+
+	// Confirm with 'y'
+	confirmedM, _ := updated.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	postDelete := confirmedM.(Model)
+
+	if postDelete.confirmDelete {
+		t.Errorf("expected confirmDelete to be false after confirmation")
+	}
+	if dp.removedAccount != "work" {
+		t.Errorf("expected provider.RemoveAccount to be called with 'work', got: %q", dp.removedAccount)
+	}
+	if !strings.Contains(postDelete.statusMsg, "Removed profile 'work' ✓") {
+		t.Errorf("expected statusMsg to show removal, got: %q", postDelete.statusMsg)
+	}
+}
+
+func TestDeleteAccountCancel(t *testing.T) {
+	dp := &dummyProvider{id: "p1", name: "Provider 1"}
+	m := NewModel(config.Config{}, dp)
+	m.accounts = []provider.StoredAccount{
+		{ID: "personal", Email: "personal@example.com"},
+	}
+	m.cursor = 0
+
+	// Press 'x'
+	newM, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	updated := newM.(Model)
+
+	if !updated.confirmDelete {
+		t.Fatalf("expected confirmDelete to be true")
+	}
+
+	// Cancel with 'n'
+	cancelM, _ := updated.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	postCancel := cancelM.(Model)
+
+	if postCancel.confirmDelete {
+		t.Errorf("expected confirmDelete to be false")
+	}
+	if dp.removedAccount != "" {
+		t.Errorf("expected provider.RemoveAccount not to be called, got %q", dp.removedAccount)
+	}
+	if !strings.Contains(postCancel.statusMsg, "cancelled") {
+		t.Errorf("expected statusMsg to indicate cancelled, got %q", postCancel.statusMsg)
+	}
+}
+
+func TestHelpModalToggle(t *testing.T) {
+	dp := &dummyProvider{id: "p1", name: "Provider 1"}
+	m := NewModel(config.Config{}, dp)
+
+	// Press '?'
+	newM, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	updated := newM.(Model)
+
+	if !updated.showHelp {
+		t.Fatalf("expected showHelp to be true")
+	}
+
+	view := updated.View()
+	if !strings.Contains(view, "swaper — Keybindings & Help") {
+		t.Errorf("expected help modal title, got:\n%s", view)
+	}
+	if !strings.Contains(view, "Navigation & Selection") {
+		t.Errorf("expected Navigation section, got:\n%s", view)
+	}
+	if !strings.Contains(view, "Account Management") {
+		t.Errorf("expected Account Management section, got:\n%s", view)
+	}
+	if !strings.Contains(view, "Delete selected profile") {
+		t.Errorf("expected delete shortcut description, got:\n%s", view)
+	}
+
+	// Press '?' again to dismiss
+	closedM, _ := updated.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	postClose := closedM.(Model)
+	if postClose.showHelp {
+		t.Errorf("expected showHelp to be false after toggle")
+	}
+
+	// Open and close with 'esc'
+	reopenedM, _ := postClose.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	withEscClose, _ := reopenedM.(Model).Update(tea.KeyMsg{Type: tea.KeyEscape})
+	if withEscClose.(Model).showHelp {
+		t.Errorf("expected showHelp to be false after esc")
+	}
+}
+
+func TestSearchAndFilterRealTime(t *testing.T) {
+	dp := &dummyProvider{id: "p1", name: "Provider 1"}
+	m := NewModel(config.Config{}, dp)
+	m.accounts = []provider.StoredAccount{
+		{ID: "alpha", Email: "alice@work.com"},
+		{ID: "beta", Email: "bob@personal.com"},
+		{ID: "gamma", Email: "charlie@work.com"},
+	}
+
+	// Press '/' to enter search mode
+	newM, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	mSearch := newM.(Model)
+	if !mSearch.searchMode {
+		t.Fatalf("expected searchMode to be true")
+	}
+
+	// Type 'b' then 'e' then 't'
+	for _, ch := range "bet" {
+		nm, _ := mSearch.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
+		mSearch = nm.(Model)
+	}
+
+	if mSearch.filterQuery != "bet" {
+		t.Errorf("expected filterQuery to be 'bet', got %q", mSearch.filterQuery)
+	}
+
+	filtered := mSearch.FilteredAccounts()
+	if len(filtered) != 1 || filtered[0].ID != "beta" {
+		t.Fatalf("expected only 'beta' to match, got: %v", filtered)
+	}
+
+	view := mSearch.View()
+	if !strings.Contains(view, "beta") {
+		t.Errorf("expected view to contain 'beta', got:\n%s", view)
+	}
+	if strings.Contains(view, "alpha") {
+		t.Errorf("expected view not to contain 'alpha' while filtered, got:\n%s", view)
+	}
+
+	// Press Enter to confirm search query
+	confirmedM, _ := mSearch.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mConfirmed := confirmedM.(Model)
+	if mConfirmed.searchMode {
+		t.Errorf("expected searchMode to be false after Enter")
+	}
+	if mConfirmed.filterQuery != "bet" {
+		t.Errorf("expected filterQuery to remain 'bet', got %q", mConfirmed.filterQuery)
+	}
+
+	// Press Esc to clear filter
+	clearedM, _ := mConfirmed.Update(tea.KeyMsg{Type: tea.KeyEscape})
+	mCleared := clearedM.(Model)
+	if mCleared.filterQuery != "" {
+		t.Errorf("expected filterQuery to be empty after Esc, got %q", mCleared.filterQuery)
+	}
+	if len(mCleared.FilteredAccounts()) != 3 {
+		t.Errorf("expected all 3 accounts to be present, got %d", len(mCleared.FilteredAccounts()))
+	}
+}
+
+func TestAddAndLoginPromptAndCompletion(t *testing.T) {
+	dp := &dummyProvider{id: "p1", name: "Provider 1"}
+	m := NewModel(config.Config{}, dp)
+
+	// Press 'a'
+	newM, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	updated := newM.(Model)
+
+	if !updated.inputMode || updated.inputAction != "add_login" {
+		t.Fatalf("expected inputMode=true and action='add_login', got mode=%v action=%q", updated.inputMode, updated.inputAction)
+	}
+
+	view := updated.View()
+	if !strings.Contains(view, "Enter profile name") {
+		t.Errorf("expected prompt text in view, got:\n%s", view)
+	}
+
+	// Simulate login completion
+	doneM, _ := updated.Update(loginDoneMsg{name: "dev-account", err: nil})
+	postLogin := doneM.(Model)
+
+	if dp.importedName != "dev-account" {
+		t.Errorf("expected provider.ImportCurrent to be called with 'dev-account', got %q", dp.importedName)
+	}
+	if !strings.Contains(postLogin.statusMsg, "Added and logged in as 'dev-account' ✓") {
+		t.Errorf("expected success status message, got %q", postLogin.statusMsg)
+	}
+}
+
+func TestAggregateQuotaSummaryHeader(t *testing.T) {
+	dp := &dummyProvider{id: "p1", name: "Provider 1"}
+	m := NewModel(config.Config{}, dp)
+	m.accounts = []provider.StoredAccount{
+		{ID: "acc1", Email: "acc1@gmail.com"},
+		{ID: "acc2", Email: "acc2@gmail.com"},
+		{ID: "acc3", Email: "acc3@gmail.com"},
+	}
+	m.statuses = map[string]provider.AccountStatus{
+		"acc1": {
+			ID:      "acc1",
+			Healthy: true,
+			Quotas: []provider.Quota{
+				{Label: "Gemini 5h", PercentLeft: 100}, // 5.0h
+				{Label: "Gemini Weekly", PercentLeft: 90},
+			},
+		},
+		"acc2": {
+			ID:      "acc2",
+			Healthy: true,
+			Quotas: []provider.Quota{
+				{Label: "Gemini 5h", PercentLeft: 100}, // 5.0h
+			},
+		},
+		"acc3": {
+			ID:      "acc3",
+			Healthy: true,
+			Quotas: []provider.Quota{
+				{Label: "Gemini 5h", PercentLeft: 90}, // 4.5h
+			},
+		},
+	}
+
+	summary := m.AggregateQuotaSummary()
+	expected := "3 active profiles • Combined: ~14.5 hours of continuous coding quota remaining"
+	if summary != expected {
+		t.Errorf("expected %q, got %q", expected, summary)
+	}
+
+	view := m.View()
+	if !strings.Contains(view, expected) {
+		t.Errorf("expected View() to contain summary %q, got:\n%s", expected, view)
+	}
+}
+
+func TestAggregateQuotaSummarySingleAndLoading(t *testing.T) {
+	dp := &dummyProvider{id: "p1", name: "Provider 1"}
+	m := NewModel(config.Config{}, dp)
+	m.accounts = []provider.StoredAccount{
+		{ID: "single", Email: "single@gmail.com"},
+	}
+
+	// While loading
+	m.loading["single"] = true
+	loadingSummary := m.AggregateQuotaSummary()
+	if !strings.Contains(loadingSummary, "Calculating aggregate quota...") {
+		t.Errorf("expected loading message, got %q", loadingSummary)
+	}
+
+	// Once status arrives with 50% on 5-hour
+	m.loading["single"] = false
+	m.statuses["single"] = provider.AccountStatus{
+		ID:      "single",
+		Healthy: true,
+		Quotas: []provider.Quota{
+			{Label: "5-hour", PercentLeft: 50}, // 2.5h
+		},
+	}
+
+	singleSummary := m.AggregateQuotaSummary()
+	expected := "1 active profile • Combined: ~2.5 hours of continuous coding quota remaining"
+	if singleSummary != expected {
+		t.Errorf("expected %q, got %q", expected, singleSummary)
+	}
+}
+
 
 

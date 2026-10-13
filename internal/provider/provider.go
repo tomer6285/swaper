@@ -50,6 +50,7 @@ type Provider interface {
 	ActiveAccount() (*StoredAccount, error)
 	IsCLIRunning() (bool, error)
 	LaunchCLI(account StoredAccount) error
+	LoginCommand() []string
 	InvalidateCache()
 }
 
