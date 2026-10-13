@@ -103,8 +103,16 @@ func (ps *ProfileStore) ProfilePath(name string) string {
 	return filepath.Join(ps.ProfilesDir(), name)
 }
 
+func (ps *ProfileStore) BaseDir() string {
+	return ps.baseDir
+}
+
 func (ps *ProfileStore) ActiveProfileFile() string {
 	return filepath.Join(ps.baseDir, "active_profile.txt")
+}
+
+func (ps *ProfileStore) AppProfileFile() string {
+	return filepath.Join(ps.baseDir, "app_profile.txt")
 }
 
 // GetActiveProfileName reads the currently marked active profile.

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -57,6 +58,13 @@ type TierResponse struct {
 		Description string `json:"description"`
 	} `json:"currentTier"`
 }
+
+// Compile-time interface assertions.
+var (
+	_ provider.Provider            = (*Provider)(nil)
+	_ provider.AppLauncher         = (*Provider)(nil)
+	_ provider.DetailedAppLauncher = (*Provider)(nil)
+)
 
 // Provider implements provider.Provider for Antigravity (agy).
 type Provider struct {
@@ -894,5 +902,208 @@ func (p *Provider) LoginCommand() []string {
 		bin = "agy"
 	}
 	return []string{bin, "auth", "login"}
+}
+
+// AppDisplayName returns the user-facing name for the Antigravity desktop application.
+func (p *Provider) AppDisplayName() string {
+	return "Antigravity"
+}
+
+// LaunchApp launches the Antigravity Desktop application via smart launcher.
+func (p *Provider) LaunchApp() error {
+	_, err := p.LaunchAppDetailed()
+	return err
+}
+
+// LaunchAppDetailed checks whether Antigravity is running, whether it is logged in with
+// the active account, verifies there are no tasks running, and starts or restarts it accordingly.
+func (p *Provider) LaunchAppDetailed() (string, error) {
+	if runtime.GOOS != "darwin" {
+		if err := p.openAntigravityApp(); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("Launched %s ✓", p.AppDisplayName()), nil
+	}
+
+	running, _ := isAntigravityAppRunning()
+	if !running {
+		if err := p.openAntigravityApp(); err != nil {
+			return "", err
+		}
+		activeID := p.store.GetActiveProfileName()
+		if activeID != "" {
+			_ = p.setLastLaunchedAppProfile(activeID)
+		}
+		return fmt.Sprintf("Launched %s ✓", p.AppDisplayName()), nil
+	}
+
+	// Antigravity is already running. Check active profile vs running session account.
+	activeID := p.store.GetActiveProfileName()
+	if activeID == "" {
+		return fmt.Sprintf("%s is already running ✓", p.AppDisplayName()), nil
+	}
+
+	targetAuth, err := p.store.LoadProfile(activeID)
+	if err != nil {
+		return "", fmt.Errorf("failed to load active profile '%s': %w", activeID, err)
+	}
+
+	targetEmail := strings.ToLower(strings.TrimSpace(accounts.ExtractEmailFromIDToken(targetAuth.IDToken)))
+	runningEmail := getRunningAntigravityAccountInfo()
+	lastLaunched := p.getLastLaunchedAppProfile()
+
+	isRightAccount := false
+	if runningEmail != "" && targetEmail != "" {
+		isRightAccount = (runningEmail == targetEmail)
+	} else if lastLaunched != "" {
+		isRightAccount = (lastLaunched == activeID)
+	}
+
+	if isRightAccount {
+		// Already open and running with active account: return message without opening/focusing window
+		return fmt.Sprintf("%s is already running with active account (%s) ✓", p.AppDisplayName(), activeID), nil
+	}
+
+	// App is running on a different account.
+	// Step 1: Pre-check if there are currently running tasks/tools.
+	if busy, reason := hasRunningAntigravityTasks(); busy {
+		return "", fmt.Errorf("cannot restart: %s", reason)
+	}
+
+	// Step 2: Gracefully quit via AppleScript with a timeout handshake.
+	quitCmd := exec.Command("osascript", "-e", `tell application "Antigravity" to quit`)
+	if err := quitCmd.Run(); err != nil {
+		return "", fmt.Errorf("failed to request %s to quit: %w", p.AppDisplayName(), err)
+	}
+
+	deadline := time.Now().Add(2500 * time.Millisecond)
+	exited := false
+	for time.Now().Before(deadline) {
+		time.Sleep(100 * time.Millisecond)
+		isStillRunning, _ := isAntigravityAppRunning()
+		if !isStillRunning {
+			exited = true
+			break
+		}
+	}
+
+	if !exited {
+		// Do NOT force-kill!
+		return "", fmt.Errorf("cannot restart %s: quit was blocked (conversation or task in progress)", p.AppDisplayName())
+	}
+
+	time.Sleep(200 * time.Millisecond)
+	if err := p.openAntigravityApp(); err != nil {
+		return "", fmt.Errorf("failed to relaunch %s: %w", p.AppDisplayName(), err)
+	}
+	_ = p.setLastLaunchedAppProfile(activeID)
+	return fmt.Sprintf("Restarted %s with active account (%s) ✓", p.AppDisplayName(), activeID), nil
+}
+
+func (p *Provider) openAntigravityApp() error {
+	if runtime.GOOS == "darwin" {
+		cmd := exec.Command("open", "-a", "Antigravity")
+		if err := cmd.Start(); err == nil {
+			return nil
+		}
+		cmd = exec.Command("open", "/Applications/Antigravity.app")
+		if err := cmd.Start(); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("unable to launch desktop app via system opener")
+}
+
+func (p *Provider) setLastLaunchedAppProfile(id string) error {
+	path := p.store.AppProfileFile()
+	return os.WriteFile(path, []byte(id), 0600)
+}
+
+func (p *Provider) getLastLaunchedAppProfile() string {
+	path := p.store.AppProfileFile()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func isAntigravityAppRunning() (bool, int) {
+	if runtime.GOOS != "darwin" {
+		return false, 0
+	}
+	out, err := exec.Command("pgrep", "-x", "Antigravity").Output()
+	if err != nil {
+		return false, 0
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) == 0 {
+		return false, 0
+	}
+	pid, _ := strconv.Atoi(fields[0])
+	return true, pid
+}
+
+func getRunningAntigravityAccountInfo() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	path := filepath.Join(home, "Library", "Application Support", "Antigravity", "app_storage.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var storage map[string]interface{}
+	if err := json.Unmarshal(data, &storage); err != nil {
+		return ""
+	}
+	if v, ok := storage["jetski.onboarding.lastLoginUsername"].(string); ok {
+		return strings.ToLower(strings.TrimSpace(v))
+	}
+	return ""
+}
+
+func hasRunningAntigravityTasks() (bool, string) {
+	if runtime.GOOS != "darwin" {
+		return false, ""
+	}
+
+	// 1. Check if language_server has running child processes (command/tool execution)
+	out, err := exec.Command("pgrep", "-f", "Antigravity.*language_server").Output()
+	if err == nil {
+		for _, line := range strings.Fields(string(out)) {
+			lsPID, _ := strconv.Atoi(line)
+			if lsPID > 0 {
+				children, err := exec.Command("pgrep", "-P", strconv.Itoa(lsPID)).Output()
+				if err == nil && len(strings.TrimSpace(string(children))) > 0 {
+					return true, "a command or tool is currently executing in Antigravity"
+				}
+			}
+		}
+	}
+
+	// 2. Check if Antigravity or language_server holds active conversation presence locks
+	home, err := os.UserHomeDir()
+	if err == nil {
+		presenceDir := filepath.Join(home, ".gemini", "antigravity-cli", "presence")
+		if _, err := os.Stat(presenceDir); err == nil {
+			lsofOut, err := exec.Command("lsof", "+D", presenceDir).Output()
+			if err == nil {
+				lines := strings.Split(string(lsofOut), "\n")
+				for _, line := range lines {
+					fields := strings.Fields(line)
+					if len(fields) >= 2 {
+						cmdName := fields[0]
+						if strings.Contains(cmdName, "language_") || strings.Contains(cmdName, "Antigravi") {
+							return true, "an AI conversation turn or task is currently running in Antigravity"
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return false, ""
 }
 
