@@ -411,14 +411,23 @@ func (ps *ProfileStore) DeleteProfile(name string) error {
 	return nil
 }
 
-// ReadCurrentKeyring reads the active Antigravity auth token from system keyring.
-func ReadCurrentKeyring() (*StoredAuthToken, error) {
-	raw, err := keyring.Get(KeyringService, KeyringUser)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read keyring (%s/%s): %w", KeyringService, KeyringUser, err)
-	}
+// AntigravityOAuthTokenFileOverride allows tests to override the default token file location.
+var AntigravityOAuthTokenFileOverride string
 
-	// go-keyring on macOS may return raw JSON or base64
+// AntigravityOAuthTokenPath returns the file path where the Antigravity CLI
+// stores credentials on Linux (and other platforms when keyring is bypassed or unavailable).
+func AntigravityOAuthTokenPath() string {
+	if AntigravityOAuthTokenFileOverride != "" {
+		return AntigravityOAuthTokenFileOverride
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".gemini", "antigravity-cli", "antigravity-oauth-token")
+}
+
+func parseKeyringPayload(raw string) (*StoredAuthToken, error) {
 	var jsonBytes []byte
 	if strings.HasPrefix(raw, "go-keyring-base64:") {
 		trimmed := strings.TrimPrefix(raw, "go-keyring-base64:")
@@ -438,17 +447,119 @@ func ReadCurrentKeyring() (*StoredAuthToken, error) {
 	return &auth, nil
 }
 
-// WriteCurrentKeyring stores the given auth token into the system keyring.
+func readTokenFromFile(path string) (*StoredAuthToken, error) {
+	if path == "" {
+		return nil, fmt.Errorf("token file path is empty")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var auth StoredAuthToken
+	if err := json.Unmarshal(data, &auth); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal token file json: %w", err)
+	}
+	return &auth, nil
+}
+
+// ReadCurrentKeyring reads the active Antigravity auth token from the system keyring,
+// falling back to the Antigravity CLI token file (~/.gemini/antigravity-cli/antigravity-oauth-token)
+// if the keyring is unavailable or empty (standard on Linux/Ubuntu headless or locked desktop environments).
+func ReadCurrentKeyring() (*StoredAuthToken, error) {
+	var keyringAuth *StoredAuthToken
+	var keyringErr error
+
+	raw, err := keyring.Get(KeyringService, KeyringUser)
+	if err == nil {
+		auth, parseErr := parseKeyringPayload(raw)
+		if parseErr != nil {
+			keyringErr = parseErr
+		} else if HasCredentials(auth) {
+			keyringAuth = auth
+		}
+	} else {
+		keyringErr = fmt.Errorf("failed to read keyring (%s/%s): %w", KeyringService, KeyringUser, err)
+	}
+
+	// Fall back to Antigravity CLI token file
+	tokenPath := AntigravityOAuthTokenPath()
+	var fileAuth *StoredAuthToken
+	var fileErr error
+	if tokenPath != "" {
+		auth, err := readTokenFromFile(tokenPath)
+		if err == nil && HasCredentials(auth) {
+			fileAuth = auth
+		} else if err != nil {
+			fileErr = err
+		}
+	}
+
+	// If both sources are available, pick the fresher one
+	if keyringAuth != nil && fileAuth != nil {
+		if fileAuth.Token.Expiry.After(keyringAuth.Token.Expiry) {
+			return fileAuth, nil
+		}
+		return keyringAuth, nil
+	}
+	if keyringAuth != nil {
+		return keyringAuth, nil
+	}
+	if fileAuth != nil {
+		return fileAuth, nil
+	}
+
+	if keyringErr != nil && fileErr != nil {
+		return nil, fmt.Errorf("%w; fallback file (%s): %v", keyringErr, tokenPath, fileErr)
+	}
+	if keyringErr != nil {
+		return nil, keyringErr
+	}
+	if fileErr != nil {
+		return nil, fmt.Errorf("failed to read token file (%s): %w", tokenPath, fileErr)
+	}
+	return nil, fmt.Errorf("no credentials found in keyring or token file")
+}
+
+// WriteCurrentKeyring stores the given auth token into the system keyring
+// and/or the Antigravity CLI token file (~/.gemini/antigravity-cli/antigravity-oauth-token).
 func WriteCurrentKeyring(auth *StoredAuthToken) error {
 	jsonBytes, err := json.Marshal(auth)
 	if err != nil {
 		return fmt.Errorf("failed to marshal auth for keyring: %w", err)
 	}
-	// Note: on macOS go-keyring handles base64 encoding transparently
+
+	var keyringErr error
 	if err := keyring.Set(KeyringService, KeyringUser, string(jsonBytes)); err != nil {
-		return fmt.Errorf("failed to set keyring (%s/%s): %w", KeyringService, KeyringUser, err)
+		keyringErr = fmt.Errorf("failed to set keyring (%s/%s): %w", KeyringService, KeyringUser, err)
 	}
-	return nil
+
+	var fileErr error
+	tokenPath := AntigravityOAuthTokenPath()
+	if tokenPath != "" {
+		dir := filepath.Dir(tokenPath)
+		if mkErr := os.MkdirAll(dir, 0700); mkErr != nil {
+			fileErr = fmt.Errorf("failed to create directory for token file: %w", mkErr)
+		} else {
+			formatted, formatErr := json.MarshalIndent(auth, "", "  ")
+			if formatErr != nil {
+				formatted = jsonBytes
+			}
+			tmpPath := fmt.Sprintf("%s.tmp.%d", tokenPath, time.Now().UnixNano())
+			if writeErr := os.WriteFile(tmpPath, formatted, 0600); writeErr != nil {
+				fileErr = fmt.Errorf("failed to write temp token file: %w", writeErr)
+			} else if renErr := os.Rename(tmpPath, tokenPath); renErr != nil {
+				_ = os.Remove(tmpPath)
+				fileErr = fmt.Errorf("failed to replace token file: %w", renErr)
+			}
+		}
+	}
+
+	// As long as at least one write succeeded, the write is considered successful.
+	if keyringErr == nil || fileErr == nil {
+		return nil
+	}
+
+	return fmt.Errorf("%w and failed to write token file: %v", keyringErr, fileErr)
 }
 
 // EnsureValidAccessToken checks if access token is expired; if so, uses refresh_token to obtain a new one.

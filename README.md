@@ -59,7 +59,7 @@ swaper -p antigravity status
 - Config: `~/.swaper/config.json`
 - `antigravity` profiles: `~/.swaper/antigravity/profiles/<name>/auth.json`
 - `antigravity` active pointer: `~/.swaper/antigravity/active_profile.txt`
-- `antigravity` live session: system keyring (`gemini` / `antigravity`)
+- `antigravity` live session: system keyring (`gemini` / `antigravity`) with fallback to `~/.gemini/antigravity-cli/antigravity-oauth-token`
 - `openai` profiles: `~/.swaper/openai/profiles/<name>/auth.json`
 - `openai` active pointer: `~/.swaper/openai/active_profile.txt`
 - `openai` live session: `~/.codex/auth.json`
