@@ -135,6 +135,39 @@ func TestFetchQuotasFallsBackToNextEndpoint(t *testing.T) {
 	}
 }
 
+func TestFetchQuotasFallsBackWhenPrimaryLacksGemini(t *testing.T) {
+	otherOnlyBody := `{"groups":[{"displayName":"Claude and GPT models","buckets":[{"bucketId":"3p-5h","window":"5h","remainingFraction":1.0},{"bucketId":"3p-weekly","window":"weekly","remainingFraction":1.0}]}]}`
+	geminiBody := `{"groups":[{"displayName":"Gemini Models","buckets":[{"bucketId":"gemini-5h","window":"5h","resetTime":"2030-08-27T15:45:28Z","remainingFraction":0.84},{"bucketId":"gemini-weekly","window":"weekly","resetTime":"2030-08-29T12:08:59Z","remainingFraction":0.85}]},{"displayName":"Claude and GPT models","buckets":[{"bucketId":"3p-5h","window":"5h","remainingFraction":1.0},{"bucketId":"3p-weekly","window":"weekly","remainingFraction":1.0}]}]}`
+
+	srvOther := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, otherOnlyBody)
+	}))
+	t.Cleanup(srvOther.Close)
+
+	srvGemini := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, geminiBody)
+	}))
+	t.Cleanup(srvGemini.Close)
+
+	p, err := NewProvider(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.quotaEndpoints = []string{srvOther.URL, srvGemini.URL}
+	p.httpClient = srvGemini.Client()
+
+	q, err := p.fetchQuotas(context.Background(), "tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(q) != 4 {
+		t.Fatalf("expected 4 quotas (fallback should have picked up Gemini + Other), got %d: %+v", len(q), q)
+	}
+	if q[0].Label != "Gemini 5h" || q[1].Label != "Gemini Weekly" {
+		t.Fatalf("expected Gemini quotas first, got %+v", q)
+	}
+}
+
 func TestFetchQuotasAllEndpointsFail(t *testing.T) {
 	p, err := NewProvider(t.TempDir())
 	if err != nil {

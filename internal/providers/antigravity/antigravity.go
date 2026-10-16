@@ -23,13 +23,12 @@ import (
 )
 
 const (
-	// Primary hosts. agy itself talks to daily-cloudcode-pa (see its
-	// quota_manager / cli.log); the plain cloudcode-pa host returns stale
-	// buckets (e.g. 5h stuck at 1.0), so it is only a fallback.
-	QuotaEndpoint         = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
-	QuotaFallbackEndpoint = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
-	TierEndpoint          = "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
-	TierFallbackEndpoint  = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
+	// Primary hosts. Production cloudcode-pa returns both Gemini Models and
+	// Claude/GPT (Other) groups. daily-cloudcode-pa is kept as fallback.
+	QuotaEndpoint         = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
+	QuotaFallbackEndpoint = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
+	TierEndpoint          = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
+	TierFallbackEndpoint  = "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
 	UserAgent             = "antigravity-cli"
 )
 
@@ -556,6 +555,7 @@ func (p *Provider) FetchStatus(ctx context.Context, account provider.StoredAccou
 
 func (p *Provider) fetchQuotas(ctx context.Context, accessToken string) ([]provider.Quota, error) {
 	var lastErr error
+	var fallbackQuotas []provider.Quota
 	for _, endpoint := range p.quotaEndpoints {
 		perReqCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
 		quotas, err := p.fetchQuotasFrom(perReqCtx, accessToken, endpoint)
@@ -568,12 +568,30 @@ func (p *Provider) fetchQuotas(ctx context.Context, accessToken string) ([]provi
 			lastErr = fmt.Errorf("%s returned no quota buckets", endpoint)
 			continue
 		}
-		return quotas, nil
+		if containsGeminiQuota(quotas) {
+			return quotas, nil
+		}
+		if len(fallbackQuotas) == 0 {
+			fallbackQuotas = quotas
+		}
+	}
+	if len(fallbackQuotas) > 0 {
+		return fallbackQuotas, nil
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("no quota endpoints configured")
 	}
 	return nil, lastErr
+}
+
+func containsGeminiQuota(quotas []provider.Quota) bool {
+	for _, q := range quotas {
+		l := strings.ToLower(q.Label)
+		if strings.Contains(l, "gemini") || l == "5-hour" || l == "weekly" {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *Provider) fetchQuotasFrom(ctx context.Context, accessToken, endpoint string) ([]provider.Quota, error) {
