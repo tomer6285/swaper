@@ -25,11 +25,13 @@ import (
 const (
 	// Primary hosts. Production cloudcode-pa returns both Gemini Models and
 	// Claude/GPT (Other) groups. daily-cloudcode-pa is kept as fallback.
-	QuotaEndpoint         = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
-	QuotaFallbackEndpoint = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
-	TierEndpoint          = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
-	TierFallbackEndpoint  = "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
-	UserAgent             = "antigravity-cli"
+	QuotaEndpoint             = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
+	QuotaFallbackEndpoint     = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
+	UserQuotaEndpoint         = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota"
+	UserQuotaFallbackEndpoint = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota"
+	TierEndpoint              = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
+	TierFallbackEndpoint      = "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
+	UserAgent                 = "antigravity-cli"
 )
 
 // QuotaResponse reflects the JSON payload returned by retrieveUserQuotaSummary
@@ -47,6 +49,26 @@ type QuotaResponse struct {
 		} `json:"buckets"`
 	} `json:"groups"`
 	Description string `json:"description"`
+}
+
+// UserQuotaResponse reflects the JSON payload returned by retrieveUserQuota (per-model real-time quotas)
+type UserQuotaResponse struct {
+	Buckets []struct {
+		TokenType         string  `json:"tokenType"`
+		ModelID           string  `json:"modelId"`
+		ResetTime         string  `json:"resetTime"`
+		RemainingFraction float64 `json:"remainingFraction"`
+	} `json:"buckets"`
+}
+
+type liveQuotaEntry struct {
+	RemainingFraction float64
+	ResetTime         string
+}
+
+type liveQuotas struct {
+	Gemini *liveQuotaEntry
+	Other  *liveQuotaEntry
 }
 
 // TierResponse reflects the JSON payload returned by loadCodeAssist
@@ -70,8 +92,9 @@ type Provider struct {
 	store      *accounts.ProfileStore
 	httpClient *http.Client
 
-	quotaEndpoints []string
-	tierEndpoints  []string
+	quotaEndpoints     []string
+	userQuotaEndpoints []string
+	tierEndpoints      []string
 
 	// Cache quota requests to prevent rate limits
 	cacheMu   sync.RWMutex
@@ -100,10 +123,11 @@ func NewProvider(storageDir string) (*Provider, error) {
 			Timeout:   10 * time.Second,
 			Transport: tr,
 		},
-		quotaEndpoints: []string{QuotaEndpoint, QuotaFallbackEndpoint},
-		tierEndpoints:  []string{TierEndpoint, TierFallbackEndpoint},
-		cache:          make(map[string]cacheEntry),
-		cacheFile:      filepath.Join(antigravityDir, "cache.json"),
+		quotaEndpoints:     []string{QuotaEndpoint, QuotaFallbackEndpoint},
+		userQuotaEndpoints: []string{UserQuotaEndpoint, UserQuotaFallbackEndpoint},
+		tierEndpoints:      []string{TierEndpoint, TierFallbackEndpoint},
+		cache:              make(map[string]cacheEntry),
+		cacheFile:          filepath.Join(antigravityDir, "cache.json"),
 	}
 	p.loadCacheFromDisk()
 	return p, nil
@@ -554,6 +578,90 @@ func (p *Provider) FetchStatus(ctx context.Context, account provider.StoredAccou
 }
 
 func (p *Provider) fetchQuotas(ctx context.Context, accessToken string) ([]provider.Quota, error) {
+	var (
+		summaryQuotas []provider.Quota
+		live          *liveQuotas
+		summaryErr    error
+		wg            sync.WaitGroup
+	)
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		summaryQuotas, summaryErr = p.fetchSummaryQuotas(ctx, accessToken)
+	}()
+	go func() {
+		defer wg.Done()
+		live, _ = p.fetchLiveUserQuotas(ctx, accessToken)
+	}()
+	wg.Wait()
+
+	if summaryErr != nil && live == nil {
+		return nil, summaryErr
+	}
+
+	now := time.Now()
+	var quotas []provider.Quota
+
+	if len(summaryQuotas) > 0 {
+		quotas = summaryQuotas
+	} else if live != nil {
+		if live.Gemini != nil {
+			resetTime, resetIn := parseResetTime(live.Gemini.ResetTime, now)
+			pct := live.Gemini.RemainingFraction * 100.0
+			if pct >= 100.0 {
+				resetIn = "—"
+			}
+			quotas = append(quotas, provider.Quota{
+				Label:       "Gemini 5h",
+				PercentLeft: pct,
+				ResetAt:     resetTime,
+				ResetIn:     resetIn,
+			})
+		}
+		if live.Other != nil {
+			resetTime, resetIn := parseResetTime(live.Other.ResetTime, now)
+			pct := live.Other.RemainingFraction * 100.0
+			if pct >= 100.0 {
+				resetIn = "—"
+			}
+			quotas = append(quotas, provider.Quota{
+				Label:       "Other 5h",
+				PercentLeft: pct,
+				ResetAt:     resetTime,
+				ResetIn:     resetIn,
+			})
+		}
+		return quotas, nil
+	}
+
+	for i := range quotas {
+		lbl := strings.ToLower(quotas[i].Label)
+		is5h := strings.Contains(lbl, "5h") || strings.Contains(lbl, "5-hour")
+
+		if is5h {
+			if (strings.Contains(lbl, "gemini") || lbl == "5-hour") && live != nil && live.Gemini != nil {
+				quotas[i].PercentLeft = live.Gemini.RemainingFraction * 100.0
+				resetTime, resetIn := parseResetTime(live.Gemini.ResetTime, now)
+				quotas[i].ResetAt = resetTime
+				quotas[i].ResetIn = resetIn
+			} else if strings.Contains(lbl, "other") && live != nil && live.Other != nil {
+				quotas[i].PercentLeft = live.Other.RemainingFraction * 100.0
+				resetTime, resetIn := parseResetTime(live.Other.ResetTime, now)
+				quotas[i].ResetAt = resetTime
+				quotas[i].ResetIn = resetIn
+			}
+		}
+
+		if quotas[i].PercentLeft >= 100.0 {
+			quotas[i].ResetIn = "—"
+		}
+	}
+
+	return quotas, nil
+}
+
+func (p *Provider) fetchSummaryQuotas(ctx context.Context, accessToken string) ([]provider.Quota, error) {
 	var lastErr error
 	var fallbackQuotas []provider.Quota
 	for _, endpoint := range p.quotaEndpoints {
@@ -582,6 +690,72 @@ func (p *Provider) fetchQuotas(ctx context.Context, accessToken string) ([]provi
 		lastErr = fmt.Errorf("no quota endpoints configured")
 	}
 	return nil, lastErr
+}
+
+func (p *Provider) fetchLiveUserQuotas(ctx context.Context, accessToken string) (*liveQuotas, error) {
+	for _, endpoint := range p.userQuotaEndpoints {
+		perReqCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+		lq, err := p.fetchLiveUserQuotasFrom(perReqCtx, accessToken, endpoint)
+		cancel()
+		if err == nil && lq != nil {
+			return lq, nil
+		}
+	}
+	return nil, fmt.Errorf("all user quota endpoints failed")
+}
+
+func (p *Provider) fetchLiveUserQuotasFrom(ctx context.Context, accessToken, endpoint string) (*liveQuotas, error) {
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewBuffer([]byte("{}")))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", UserAgent)
+
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var uqr UserQuotaResponse
+	if err := json.NewDecoder(resp.Body).Decode(&uqr); err != nil {
+		return nil, err
+	}
+
+	res := &liveQuotas{}
+	for _, b := range uqr.Buckets {
+		modelID := strings.ToLower(b.ModelID)
+		isGem := strings.Contains(modelID, "gemini")
+		isOther := strings.Contains(modelID, "claude") || strings.Contains(modelID, "gpt") || strings.Contains(modelID, "3p")
+
+		if isGem {
+			if res.Gemini == nil || b.RemainingFraction < res.Gemini.RemainingFraction {
+				res.Gemini = &liveQuotaEntry{
+					RemainingFraction: b.RemainingFraction,
+					ResetTime:         b.ResetTime,
+				}
+			}
+		} else if isOther {
+			if res.Other == nil || b.RemainingFraction < res.Other.RemainingFraction {
+				res.Other = &liveQuotaEntry{
+					RemainingFraction: b.RemainingFraction,
+					ResetTime:         b.ResetTime,
+				}
+			}
+		}
+	}
+
+	return res, nil
 }
 
 func containsGeminiQuota(quotas []provider.Quota) bool {
@@ -688,9 +862,13 @@ func (p *Provider) fetchQuotasFrom(ctx context.Context, accessToken, endpoint st
 	hasBoth := hasGemini && hasOther
 	for _, b := range allBuckets {
 		resetTime, resetIn := parseResetTime(b.ResetTime, now)
+		pct := b.RemainingFraction * 100.0
+		if pct >= 100.0 {
+			resetIn = "—"
+		}
 		quotas = append(quotas, provider.Quota{
 			Label:       quotaDisplayLabel(b.BucketID, b.Window, b.IsGemini, b.IsOther, hasBoth),
-			PercentLeft: b.RemainingFraction * 100.0,
+			PercentLeft: pct,
 			ResetAt:     resetTime,
 			ResetIn:     resetIn,
 			Description: b.Description,

@@ -25,6 +25,7 @@ func testServer(t *testing.T, quotaBody string) *Provider {
 		t.Fatal(err)
 	}
 	p.quotaEndpoints = []string{srv.URL + "/quota"}
+	p.userQuotaEndpoints = []string{srv.URL + "/user_quota"}
 	p.tierEndpoints = []string{srv.URL + "/tier"}
 	p.httpClient = srv.Client()
 	return p
@@ -125,6 +126,7 @@ func TestFetchQuotasFallsBackToNextEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	p.quotaEndpoints = []string{"http://127.0.0.1:1/quota", good.URL}
+	p.userQuotaEndpoints = []string{"http://127.0.0.1:1/user_quota"}
 	p.httpClient = good.Client()
 	q, err := p.fetchQuotas(context.Background(), "tok")
 	if err != nil {
@@ -154,6 +156,7 @@ func TestFetchQuotasFallsBackWhenPrimaryLacksGemini(t *testing.T) {
 		t.Fatal(err)
 	}
 	p.quotaEndpoints = []string{srvOther.URL, srvGemini.URL}
+	p.userQuotaEndpoints = []string{"http://127.0.0.1:1/user_quota"}
 	p.httpClient = srvGemini.Client()
 
 	q, err := p.fetchQuotas(context.Background(), "tok")
@@ -168,12 +171,60 @@ func TestFetchQuotasFallsBackWhenPrimaryLacksGemini(t *testing.T) {
 	}
 }
 
+func TestFetchQuotasMergesLivePerModelQuotas(t *testing.T) {
+	summaryBody := `{"groups":[{"displayName":"Gemini Models","buckets":[{"bucketId":"gemini-5h","window":"5h","resetTime":"2030-08-27T15:45:28Z","remainingFraction":1.0},{"bucketId":"gemini-weekly","window":"weekly","resetTime":"2030-08-29T12:08:59Z","remainingFraction":0.85}]},{"displayName":"Claude and GPT models","buckets":[{"bucketId":"3p-5h","window":"5h","remainingFraction":1.0},{"bucketId":"3p-weekly","window":"weekly","remainingFraction":1.0}]}]}`
+	liveBody := `{"buckets":[{"modelId":"gemini-3.8-flash-tiered","tokenType":"WTUS","resetTime":"2030-08-27T12:00:00Z","remainingFraction":0.68},{"modelId":"claude-sonnet-4-6","tokenType":"WTUS","resetTime":"2030-08-27T12:00:00Z","remainingFraction":0.90}]}`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/user_quota" {
+			fmt.Fprint(w, liveBody)
+			return
+		}
+		fmt.Fprint(w, summaryBody)
+	}))
+	t.Cleanup(srv.Close)
+
+	p, err := NewProvider(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.quotaEndpoints = []string{srv.URL + "/summary"}
+	p.userQuotaEndpoints = []string{srv.URL + "/user_quota"}
+	p.httpClient = srv.Client()
+
+	q, err := p.fetchQuotas(context.Background(), "tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(q) != 4 {
+		t.Fatalf("expected 4 quotas, got %d", len(q))
+	}
+	// Gemini 5h should be overridden by live 0.68 (68.0%)
+	if q[0].Label != "Gemini 5h" || q[0].PercentLeft != 68.0 {
+		t.Errorf("expected Gemini 5h at 68.0%%, got %s at %v", q[0].Label, q[0].PercentLeft)
+	}
+	// Gemini Weekly should remain 85.0%
+	if q[1].Label != "Gemini Weekly" || q[1].PercentLeft != 85.0 {
+		t.Errorf("expected Gemini Weekly at 85.0%%, got %s at %v", q[1].Label, q[1].PercentLeft)
+	}
+	// Other 5h should be overridden by live 0.90 (90.0%)
+	if q[2].Label != "Other 5h" || q[2].PercentLeft != 90.0 {
+		t.Errorf("expected Other 5h at 90.0%%, got %s at %v", q[2].Label, q[2].PercentLeft)
+	}
+	// Other Weekly is 100%, so ResetIn must be "—"
+	if q[3].PercentLeft != 100.0 || q[3].ResetIn != "—" {
+		t.Errorf("expected Other Weekly at 100%% with ResetIn '—', got %v, %q", q[3].PercentLeft, q[3].ResetIn)
+	}
+}
+
 func TestFetchQuotasAllEndpointsFail(t *testing.T) {
 	p, err := NewProvider(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	p.quotaEndpoints = []string{"http://127.0.0.1:1/quota"}
+	p.userQuotaEndpoints = []string{"http://127.0.0.1:1/user_quota"}
 	if _, err := p.fetchQuotas(context.Background(), "tok"); err == nil {
 		t.Fatal("expected error when all endpoints fail")
 	}

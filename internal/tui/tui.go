@@ -787,15 +787,21 @@ func (m Model) AggregateQuotaSummary() string {
 		}
 
 		var primaryQuota *provider.Quota
+		var weeklyQuota *provider.Quota
 		for i, q := range st.Quotas {
 			lbl := strings.ToLower(q.Label)
 			if strings.Contains(lbl, "5h") || strings.Contains(lbl, "5-hour") || strings.Contains(lbl, "5 hour") {
 				if strings.Contains(lbl, "gemini") {
 					primaryQuota = &st.Quotas[i]
-					break
-				}
-				if primaryQuota == nil {
+				} else if primaryQuota == nil {
 					primaryQuota = &st.Quotas[i]
+				}
+			}
+			if strings.Contains(lbl, "week") {
+				if strings.Contains(lbl, "gemini") {
+					weeklyQuota = &st.Quotas[i]
+				} else if weeklyQuota == nil {
+					weeklyQuota = &st.Quotas[i]
 				}
 			}
 		}
@@ -813,13 +819,21 @@ func (m Model) AggregateQuotaSummary() string {
 				if n, _ := fmt.Sscanf(lbl, "%dm", &mins); n == 1 && mins > 0 {
 					windowHours = float64(mins) / 60.0
 				}
-			} else if strings.Contains(lbl, "h") {
-				var hrs float64
-				if n, _ := fmt.Sscanf(lbl, "%fh", &hrs); n == 1 && hrs > 0 {
-					windowHours = hrs
+			} else {
+				for _, part := range strings.Fields(lbl) {
+					var hrs float64
+					if n, _ := fmt.Sscanf(part, "%fh", &hrs); n == 1 && hrs > 0 {
+						windowHours = hrs
+						break
+					}
 				}
 			}
-			totalHours += (primaryQuota.PercentLeft / 100.0) * windowHours
+
+			percent := primaryQuota.PercentLeft
+			if weeklyQuota != nil && weeklyQuota.PercentLeft <= 0 {
+				percent = 0
+			}
+			totalHours += (percent / 100.0) * windowHours
 		}
 	}
 

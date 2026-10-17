@@ -25,7 +25,7 @@ func TestReadCurrentKeyring_FileFallback(t *testing.T) {
 	sampleAuth.Token.AccessToken = "ya29.test-access-token"
 	sampleAuth.Token.RefreshToken = "1//test-refresh-token"
 	sampleAuth.Token.TokenType = "Bearer"
-	sampleAuth.Token.Expiry = time.Now().Add(1 * time.Hour)
+	sampleAuth.Token.Expiry = time.Now().Add(24 * time.Hour)
 
 	data, err := json.MarshalIndent(sampleAuth, "", "  ")
 	if err != nil {

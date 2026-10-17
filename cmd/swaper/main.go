@@ -367,7 +367,11 @@ func main() {
 					continue
 				}
 				for _, q := range st.Quotas {
-					fmt.Printf("   %-13s: %5.1f%% remaining  (resets in %s)\n", q.Label, q.PercentLeft, q.ResetIn)
+					if q.ResetIn == "—" || q.ResetIn == "" {
+						fmt.Printf("   %-13s: %5.1f%% remaining\n", q.Label, q.PercentLeft)
+					} else {
+						fmt.Printf("   %-13s: %5.1f%% remaining  (resets in %s)\n", q.Label, q.PercentLeft, q.ResetIn)
+					}
 				}
 				fmt.Println()
 			}

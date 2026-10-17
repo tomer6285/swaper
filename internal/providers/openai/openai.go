@@ -799,8 +799,17 @@ func (p *Provider) fetchRateLimits(ctx context.Context, codexHome string) ([]pro
 		Params:  map[string]interface{}{},
 	}
 
+	initializedReq := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"method":  "initialized",
+		"params":  map[string]interface{}{},
+	}
+
 	enc := json.NewEncoder(stdin)
 	if err := enc.Encode(initReq); err != nil {
+		return nil, "", "", err
+	}
+	if err := enc.Encode(initializedReq); err != nil {
 		return nil, "", "", err
 	}
 	if err := enc.Encode(rlReq); err != nil {
@@ -830,26 +839,34 @@ func (p *Provider) fetchRateLimits(ctx context.Context, codexHome string) ([]pro
 			rl := resp.Result.RateLimits
 			if p := rl.Primary; p != nil {
 				resetTime, resetIn := parseUnixReset(p.ResetsAt, now)
+				pct := float64(100 - p.UsedPercent)
+				if pct >= 100.0 {
+					resetIn = "—"
+				}
 				label := "5-hour"
 				if p.WindowDurationMins > 0 && p.WindowDurationMins != 300 {
 					label = fmt.Sprintf("%dm", p.WindowDurationMins)
 				}
 				quotas = append(quotas, provider.Quota{
 					Label:       label,
-					PercentLeft: float64(100 - p.UsedPercent),
+					PercentLeft: pct,
 					ResetAt:     resetTime,
 					ResetIn:     resetIn,
 				})
 			}
 			if s := rl.Secondary; s != nil {
 				resetTime, resetIn := parseUnixReset(s.ResetsAt, now)
+				pct := float64(100 - s.UsedPercent)
+				if pct >= 100.0 {
+					resetIn = "—"
+				}
 				label := "Weekly"
 				if s.WindowDurationMins > 0 && s.WindowDurationMins != 10080 {
 					label = fmt.Sprintf("%dm", s.WindowDurationMins)
 				}
 				quotas = append(quotas, provider.Quota{
 					Label:       label,
-					PercentLeft: float64(100 - s.UsedPercent),
+					PercentLeft: pct,
 					ResetAt:     resetTime,
 					ResetIn:     resetIn,
 				})
