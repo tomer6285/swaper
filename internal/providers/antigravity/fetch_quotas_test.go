@@ -137,7 +137,7 @@ func TestFetchQuotasFallsBackToNextEndpoint(t *testing.T) {
 	}
 }
 
-func TestFetchQuotasFallsBackWhenPrimaryLacksGemini(t *testing.T) {
+func TestFetchQuotasKeepsDailyResponseWhenGeminiMissing(t *testing.T) {
 	otherOnlyBody := `{"groups":[{"displayName":"Claude and GPT models","buckets":[{"bucketId":"3p-5h","window":"5h","remainingFraction":1.0},{"bucketId":"3p-weekly","window":"weekly","remainingFraction":1.0}]}]}`
 	geminiBody := `{"groups":[{"displayName":"Gemini Models","buckets":[{"bucketId":"gemini-5h","window":"5h","resetTime":"2030-08-27T15:45:28Z","remainingFraction":0.84},{"bucketId":"gemini-weekly","window":"weekly","resetTime":"2030-08-29T12:08:59Z","remainingFraction":0.85}]},{"displayName":"Claude and GPT models","buckets":[{"bucketId":"3p-5h","window":"5h","remainingFraction":1.0},{"bucketId":"3p-weekly","window":"weekly","remainingFraction":1.0}]}]}`
 
@@ -147,6 +147,7 @@ func TestFetchQuotasFallsBackWhenPrimaryLacksGemini(t *testing.T) {
 	t.Cleanup(srvOther.Close)
 
 	srvGemini := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("must not query another summary server when daily omits Gemini")
 		fmt.Fprint(w, geminiBody)
 	}))
 	t.Cleanup(srvGemini.Close)
@@ -163,11 +164,8 @@ func TestFetchQuotasFallsBackWhenPrimaryLacksGemini(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(q) != 4 {
-		t.Fatalf("expected 4 quotas (fallback should have picked up Gemini + Other), got %d: %+v", len(q), q)
-	}
-	if q[0].Label != "Gemini 5h" || q[1].Label != "Gemini Weekly" {
-		t.Fatalf("expected Gemini quotas first, got %+v", q)
+	if len(q) != 2 || q[0].Label != "Other 5h" || q[1].Label != "Other Weekly" || q[1].PercentLeft != 100 {
+		t.Fatalf("expected daily's Other quotas without production Gemini values, got %+v", q)
 	}
 }
 
@@ -248,5 +246,15 @@ func TestAntigravityLoginCommandReturnsNil(t *testing.T) {
 	}
 	if cmd := p.LoginCommand(); cmd != nil {
 		t.Fatalf("expected Antigravity LoginCommand to return nil, got %v", cmd)
+	}
+}
+
+func TestDefaultSummaryUsesOnlyAgyServer(t *testing.T) {
+	p, err := NewProvider(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.quotaEndpoints) != 1 || p.quotaEndpoints[0] != "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary" {
+		t.Fatalf("unexpected summary servers: %v", p.quotaEndpoints)
 	}
 }

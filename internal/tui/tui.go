@@ -999,6 +999,19 @@ func (m Model) renderAccountCard(acc provider.StoredAccount, isSelected bool) st
 		quotaContent = "  " + strings.Join(parts, "   │   ")
 	}
 
+	if hasStatus && st.Healthy && m.provider != nil && m.provider.ID() == "antigravity" {
+		hasGeminiWeekly := false
+		for _, q := range st.Quotas {
+			label := strings.ToLower(q.Label)
+			if label == "weekly" || label == "gemini weekly" {
+				hasGeminiWeekly = true
+			}
+		}
+		if !hasGeminiWeekly {
+			quotaContent += "\n\n" + dimStyle.Render("  Gemini Weekly: Unavailable")
+		}
+	}
+
 	content := header + "\n" + quotaContent
 
 	if isSelected {

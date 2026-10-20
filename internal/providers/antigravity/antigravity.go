@@ -23,10 +23,9 @@ import (
 )
 
 const (
-	// Primary hosts. Production cloudcode-pa returns both Gemini Models and
-	// Claude/GPT (Other) groups. daily-cloudcode-pa is kept as fallback.
-	QuotaEndpoint             = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
-	QuotaFallbackEndpoint     = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
+	// Weekly quotas must come from the same server as agy. Production summaries
+	// can describe different pools, so do not use them to fill missing buckets.
+	QuotaEndpoint             = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
 	UserQuotaEndpoint         = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota"
 	UserQuotaFallbackEndpoint = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota"
 	TierEndpoint              = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
@@ -123,11 +122,11 @@ func NewProvider(storageDir string) (*Provider, error) {
 			Timeout:   10 * time.Second,
 			Transport: tr,
 		},
-		quotaEndpoints:     []string{QuotaEndpoint, QuotaFallbackEndpoint},
+		quotaEndpoints:     []string{QuotaEndpoint},
 		userQuotaEndpoints: []string{UserQuotaEndpoint, UserQuotaFallbackEndpoint},
 		tierEndpoints:      []string{TierEndpoint, TierFallbackEndpoint},
 		cache:              make(map[string]cacheEntry),
-		cacheFile:          filepath.Join(antigravityDir, "cache.json"),
+		cacheFile:          filepath.Join(antigravityDir, "cache-daily-v1.json"),
 	}
 	p.loadCacheFromDisk()
 	return p, nil
@@ -663,7 +662,6 @@ func (p *Provider) fetchQuotas(ctx context.Context, accessToken string) ([]provi
 
 func (p *Provider) fetchSummaryQuotas(ctx context.Context, accessToken string) ([]provider.Quota, error) {
 	var lastErr error
-	var fallbackQuotas []provider.Quota
 	for _, endpoint := range p.quotaEndpoints {
 		perReqCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
 		quotas, err := p.fetchQuotasFrom(perReqCtx, accessToken, endpoint)
@@ -676,15 +674,7 @@ func (p *Provider) fetchSummaryQuotas(ctx context.Context, accessToken string) (
 			lastErr = fmt.Errorf("%s returned no quota buckets", endpoint)
 			continue
 		}
-		if containsGeminiQuota(quotas) {
-			return quotas, nil
-		}
-		if len(fallbackQuotas) == 0 {
-			fallbackQuotas = quotas
-		}
-	}
-	if len(fallbackQuotas) > 0 {
-		return fallbackQuotas, nil
+		return quotas, nil
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("no quota endpoints configured")
@@ -756,16 +746,6 @@ func (p *Provider) fetchLiveUserQuotasFrom(ctx context.Context, accessToken, end
 	}
 
 	return res, nil
-}
-
-func containsGeminiQuota(quotas []provider.Quota) bool {
-	for _, q := range quotas {
-		l := strings.ToLower(q.Label)
-		if strings.Contains(l, "gemini") || l == "5-hour" || l == "weekly" {
-			return true
-		}
-	}
-	return false
 }
 
 func (p *Provider) fetchQuotasFrom(ctx context.Context, accessToken, endpoint string) ([]provider.Quota, error) {
@@ -1300,4 +1280,3 @@ func hasRunningAntigravityTasks() (bool, string) {
 
 	return false, ""
 }
-

@@ -66,36 +66,38 @@ type dummyProvider struct {
 	noLoginCmd     bool
 }
 
-func (d *dummyProvider) ID() string                                                               { return d.id }
-func (d *dummyProvider) DisplayName() string                                                      { return d.name }
-func (d *dummyProvider) CLIBinary() string                                                        { return d.id }
-func (d *dummyProvider) ListAccounts() ([]provider.StoredAccount, error)                           { return nil, nil }
+func (d *dummyProvider) ID() string                                      { return d.id }
+func (d *dummyProvider) DisplayName() string                             { return d.name }
+func (d *dummyProvider) CLIBinary() string                               { return d.id }
+func (d *dummyProvider) ListAccounts() ([]provider.StoredAccount, error) { return nil, nil }
 func (d *dummyProvider) FetchStatus(ctx context.Context, acc provider.StoredAccount) (provider.AccountStatus, error) {
 	return provider.AccountStatus{}, nil
 }
-func (d *dummyProvider) CachedStatus(id string) (provider.AccountStatus, bool)                    { return provider.AccountStatus{}, false }
-func (d *dummyProvider) SwitchTo(acc provider.StoredAccount) error                                { return nil }
+func (d *dummyProvider) CachedStatus(id string) (provider.AccountStatus, bool) {
+	return provider.AccountStatus{}, false
+}
+func (d *dummyProvider) SwitchTo(acc provider.StoredAccount) error { return nil }
 func (d *dummyProvider) ImportCurrent(id, email string) (*provider.StoredAccount, error) {
 	d.importedName = id
 	d.importedEmail = email
 	return &provider.StoredAccount{ID: id, Email: email, IsActive: true}, nil
 }
-func (d *dummyProvider) AddNew(id, email string) (*provider.StoredAccount, error)                 { return nil, nil }
+func (d *dummyProvider) AddNew(id, email string) (*provider.StoredAccount, error) { return nil, nil }
 func (d *dummyProvider) RemoveAccount(id string) error {
 	d.removedAccount = id
 	return nil
 }
-func (d *dummyProvider) RenameAccount(oldID, newID string) error                                  { return nil }
-func (d *dummyProvider) ActiveAccount() (*provider.StoredAccount, error)                          { return nil, nil }
-func (d *dummyProvider) IsCLIRunning() (bool, error)                                              { return false, nil }
-func (d *dummyProvider) LaunchCLI(acc provider.StoredAccount) error                               { return nil }
+func (d *dummyProvider) RenameAccount(oldID, newID string) error         { return nil }
+func (d *dummyProvider) ActiveAccount() (*provider.StoredAccount, error) { return nil, nil }
+func (d *dummyProvider) IsCLIRunning() (bool, error)                     { return false, nil }
+func (d *dummyProvider) LaunchCLI(acc provider.StoredAccount) error      { return nil }
 func (d *dummyProvider) LoginCommand() []string {
 	if d.noLoginCmd {
 		return nil
 	}
 	return []string{"true"}
 }
-func (d *dummyProvider) InvalidateCache()                                                         {}
+func (d *dummyProvider) InvalidateCache() {}
 
 func TestTabSwitchesProviderWithoutStatusText(t *testing.T) {
 	p1 := &dummyProvider{id: "p1", name: "Provider 1"}
@@ -611,5 +613,27 @@ func TestHeaderWidthResponsiveDoesNotOverflow(t *testing.T) {
 	}
 }
 
-
-
+func TestMissingGeminiWeeklyShowsUnavailable(t *testing.T) {
+	m := Model{
+		provider: &dummyProvider{id: "antigravity"},
+		statuses: map[string]provider.AccountStatus{"main": {
+			Healthy: true,
+			Quotas: []provider.Quota{
+				{Label: "Other 5h", PercentLeft: 100},
+				{Label: "Other Weekly", PercentLeft: 100},
+			},
+		}},
+		width: 120,
+	}
+	card := m.renderAccountCard(provider.StoredAccount{ID: "main"}, true)
+	if !strings.Contains(card, "Gemini Weekly: Unavailable") {
+		t.Fatalf("missing unavailable Gemini weekly message: %s", card)
+	}
+	m.statuses["main"] = provider.AccountStatus{Healthy: true, Quotas: []provider.Quota{
+		{Label: "5-hour", PercentLeft: 80}, {Label: "Weekly", PercentLeft: 70},
+	}}
+	card = m.renderAccountCard(provider.StoredAccount{ID: "main"}, true)
+	if strings.Contains(card, "Unavailable") {
+		t.Fatalf("reported weekly quota should be shown: %s", card)
+	}
+}
